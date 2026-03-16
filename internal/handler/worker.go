@@ -151,9 +151,10 @@ func (h *WorkerHandler) Status(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	status := map[string]string{
+	status := map[string]any{
 		"redis":    "unknown",
 		"database": "unknown",
+		"workers":  "unknown",
 	}
 	overall := http.StatusOK
 
@@ -173,12 +174,26 @@ func (h *WorkerHandler) Status(w http.ResponseWriter, r *http.Request) {
 		status["database"] = "connected"
 	}
 
+	servers, err := h.scheduler.GetServers()
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get worker servers info")
+		status["workers"] = "error"
+		overall = http.StatusServiceUnavailable
+	} else {
+		status["workers"] = map[string]any{
+			"active_count": len(servers),
+			"servers":      servers,
+		}
+		if len(servers) == 0 {
+			overall = http.StatusServiceUnavailable
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(overall)
 	json.NewEncoder(w).Encode(map[string]any{
 		"request_id": requestID,
-		"redis":      status["redis"],
-		"database":   status["database"],
+		"status":     status,
 		"queues":     queue.Names(),
 		"note":       "Use POST /worker/ping to test task processing",
 	})
@@ -201,6 +216,7 @@ func (h *WorkerHandler) Health(w http.ResponseWriter, r *http.Request) {
 	status := map[string]string{
 		"database": "up",
 		"redis":    "up",
+		"workers":  "up",
 	}
 	overall := http.StatusOK
 
@@ -216,6 +232,13 @@ func (h *WorkerHandler) Health(w http.ResponseWriter, r *http.Request) {
 		overall = http.StatusServiceUnavailable
 	}
 
+	servers, err := h.scheduler.GetServers()
+	if err != nil || len(servers) == 0 {
+		log.Warn().Err(err).Int("server_count", len(servers)).Msg("no active workers found")
+		status["workers"] = "down"
+		overall = http.StatusServiceUnavailable
+	}
+
 	duration := time.Since(start)
 
 	response := HealthResponse{
@@ -228,6 +251,7 @@ func (h *WorkerHandler) Health(w http.ResponseWriter, r *http.Request) {
 		Dur("duration", duration).
 		Str("database", status["database"]).
 		Str("redis", status["redis"]).
+		Str("workers", status["workers"]).
 		Msg("worker health check completed")
 
 	w.Header().Set("Content-Type", "application/json")

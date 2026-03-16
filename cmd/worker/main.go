@@ -30,14 +30,16 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := db.Open(ctx, cfg); err != nil {
-		logg.Fatal().Err(err).Msg("failed to initialize database")
+		logg.Error().Err(err).Msg("failed to initialize database")
+		return
 	}
 	logg.Info().Msg("database connected")
 	defer db.Close()
 
 	pool := db.Get()
 	if pool == nil {
-		logg.Fatal().Msg("database pool is nil")
+		logg.Error().Msg("database pool is nil")
+		return
 	}
 
 	redisOpt := asynq.RedisClientOpt{
@@ -131,10 +133,6 @@ func main() {
 		logg.Info().Msg("worker shutdown completed gracefully")
 	case <-shutdownCtx.Done():
 		logg.Warn().Msg("worker shutdown timed out, forcing exit")
-	}
-
-	if logCleanup != nil {
-		logCleanup()
 	}
 
 	logg.Info().Msg("worker stopped cleanly")

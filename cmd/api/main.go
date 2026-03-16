@@ -32,13 +32,15 @@ func main() {
 	dbCtx, dbCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer dbCancel()
 	if err := db.Open(dbCtx, cfg); err != nil {
-		logg.Fatal().Err(err).Msg("failed to initialize database")
+		logg.Error().Err(err).Msg("failed to initialize database")
+		return
 	}
 	logg.Info().Msg("database connected")
 
 	pool := db.Get()
 	if pool == nil {
-		logg.Fatal().Msg("database pool is nil")
+		logg.Error().Msg("database pool is nil")
+		return
 	}
 
 	rdb := redis.NewClient(&redis.Options{
@@ -48,7 +50,8 @@ func main() {
 	})
 
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		logg.Fatal().Err(err).Msg("redis connection failed")
+		logg.Error().Err(err).Msg("redis connection failed")
+		return
 	}
 	logg.Info().Msg("redis connected")
 
@@ -59,9 +62,15 @@ func main() {
 	})
 	logg.Info().Msg("scheduler client initialized")
 
-	idSalt, err := strconv.ParseUint(os.Getenv("URL_SHORTENER_SALT"), 10, 64)
+	saltStr := os.Getenv("URL_SHORTENER_SALT")
+	if saltStr == "" {
+		logg.Error().Msg("URL_SHORTENER_SALT is not set")
+		return
+	}
+	idSalt, err := strconv.ParseUint(saltStr, 10, 64)
 	if err != nil {
-		logg.Fatal().Err(err).Msg("invalid URL_SHORTENER_SALT")
+		logg.Error().Err(err).Msg("invalid URL_SHORTENER_SALT")
+		return
 	}
 	router := handler.NewRouter(logg, cfg, pool, rdb, schedulerClient, idSalt)
 
