@@ -37,3 +37,5 @@ Thumbs.db
 request.md
 *.yml -diff
 *.yaml -diff
+
+CLAUDE.md

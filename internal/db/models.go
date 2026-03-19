@@ -5,24 +5,41 @@
 package db
 
 import (
+	"net/netip"
+
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type Job struct {
-	ID          pgtype.UUID        `json:"id"`
-	TaskType    string             `json:"task_type"`
-	Payload     []byte             `json:"payload"`
-	Status      string             `json:"status"`
-	Attempts    int32              `json:"attempts"`
-	LastError   pgtype.Text        `json:"last_error"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	CompletedAt pgtype.Timestamptz `json:"completed_at"`
+type ClickLog struct {
+	ID        pgtype.UUID        `json:"id"`
+	LinkID    int64              `json:"link_id"`
+	IpAddress *netip.Addr        `json:"ip_address"`
+	Referer   pgtype.Text        `json:"referer"`
+	Country   pgtype.Text        `json:"country"`
+	UserAgent pgtype.Text        `json:"user_agent"`
+	ClickedAt pgtype.Timestamptz `json:"clicked_at"`
 }
 
-type User struct {
-	ID        pgtype.UUID        `json:"id"`
-	Email     string             `json:"email"`
-	Name      string             `json:"name"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+type DailyStat struct {
+	LinkID         int64       `json:"link_id"`
+	Date           pgtype.Date `json:"date"`
+	Clicks         int64       `json:"clicks"`
+	UniqueVisitors int64       `json:"unique_visitors"`
+	Countries      []byte      `json:"countries"`
+	Referers       []byte      `json:"referers"`
+}
+
+type Link struct {
+	ID          int64              `json:"id"`
+	Slug        string             `json:"slug"`
+	OriginalUrl string             `json:"original_url"`
+	TotalClicks int64              `json:"total_clicks"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	IsDeleted   bool               `json:"is_deleted"`
+}
+
+type ProcessedEvent struct {
+	TaskID      string             `json:"task_id"`
+	JobType     string             `json:"job_type"`
+	ProcessedAt pgtype.Timestamptz `json:"processed_at"`
 }
