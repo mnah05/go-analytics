@@ -123,16 +123,16 @@ func (h *LinkHandler) DeleteLink(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	log := logger.FromChiContext(r.Context())
 
+	redisKey := fmt.Sprintf("link:%s", slug)
+	if err := h.redis.Del(r.Context(), redisKey).Err(); err != nil {
+		log.Error().Err(err).Msg("failed to delete link from redis")
+	}
+
 	_, err := h.db.SoftDeleteLink(r.Context(), pgtype.Text{String: slug, Valid: true})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to delete link")
 		NewErrorResponse(w, http.StatusNotFound, "link not found", err.Error())
 		return
-	}
-
-	redisKey := fmt.Sprintf("link:%s", slug)
-	if err := h.redis.Del(r.Context(), redisKey).Err(); err != nil {
-		log.Error().Err(err).Msg("failed to delete link from redis")
 	}
 
 	NewSuccessResponse(w, http.StatusOK, nil, "link deleted")
