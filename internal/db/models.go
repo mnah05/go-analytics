@@ -31,7 +31,7 @@ type DailyStat struct {
 
 type Link struct {
 	ID          int64              `json:"id"`
-	Slug        string             `json:"slug"`
+	Slug        pgtype.Text        `json:"slug"`
 	OriginalUrl string             `json:"original_url"`
 	TotalClicks int64              `json:"total_clicks"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`

@@ -1,6 +1,6 @@
 CREATE TABLE links (
     id BIGSERIAL PRIMARY KEY,
-    slug CHAR(11) UNIQUE NOT NULL,
+    slug CHAR(11) UNIQUE DEFAULT '',
     original_url TEXT NOT NULL,
     total_clicks BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW (),

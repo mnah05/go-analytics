@@ -22,24 +22,24 @@
 ## Phase 3: Link Handler & Routes
 
 - [x] Create `internal/handler/link.go` with a `LinkHandler` struct holding db pool, redis client, shortener, and logger
-- [ ] Implement the following handler methods:
+- [x] Implement the following handler methods:
 
 ### Create Link — `POST /links`
 
-- [ ] Accept JSON body: `{ "url": "https://example.com" }`
-- [ ] Validate the URL using `internal/validator` (required, valid URL format)
-- [ ] Insert row into `links` table with a placeholder slug (e.g., empty or temp value)
-- [ ] Generate slug from the newly returned `id` using shortener
-- [ ] Update the row's slug with `UpdateLinkSlug`
-- [ ] Cache the mapping `slug -> original_url` in Redis
-- [ ] Return `201` with `{ slug, original_url, created_at }`
+- [x] Accept JSON body: `{ "url": "https://example.com" }`
+- [x] Validate the URL using `internal/validator` (required, valid URL format)
+- [x] Insert row into `links` table with a placeholder slug (e.g., empty or temp value)
+- [x] Generate slug from the newly returned `id` using shortener
+- [x] Update the row's slug with `UpdateLinkSlug`
+- [x] Cache the mapping `slug -> original_url` in Redis
+- [x] Return `201` with `{ slug, original_url, created_at }`
 
 ### Get Link — `GET /links/{slug}`
 
-- [ ] Extract `slug` from URL path
-- [ ] Check Redis cache first (`link:<slug>`)
-- [ ] On cache miss, query DB via `GetLinkBySlug`, then populate cache
-- [ ] Return `200` with link data or `404` if not found / soft-deleted
+- [x] Extract `slug` from URL path
+- [x] Check Redis cache first (`link:<slug>`)
+- [x] On cache miss, query DB via `GetLinkBySlug`, then populate cache
+- [x] Return `200` with link data or `404` if not found / soft-deleted
 
 ### Delete Link — `DELETE /links/{id}`
 
@@ -58,13 +58,6 @@
 
 ## Phase 5: Route Registration
 
-- [ ] Register link routes in `internal/handler/router.go`:
-  ```
-  r.Route("/links", func(r chi.Router) {
-      r.Post("/", link.Create)
-      r.Get("/", link.List)
-      r.Delete("/{id}", link.Delete)
-  })
   ```
 - [ ] Add a top-level redirect route: `GET /{slug}` → resolve and redirect (302) to original URL
   - [ ] Check cache, fallback to DB

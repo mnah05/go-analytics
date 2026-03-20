@@ -1,6 +1,11 @@
 -- name: CreateLink :one
-INSERT INTO links (slug, original_url)
-VALUES ($1, $2)
+INSERT INTO links (original_url)
+VALUES ($1)
+RETURNING *;
+-- name: UpdateLinkSlug :one
+UPDATE links
+SET slug = $1
+WHERE id = $2
 RETURNING *;
 -- name: GetLinkBySlug :one
 SELECT *
@@ -15,7 +20,7 @@ WHERE id = $1
 -- name: SoftDeleteLink :one
 UPDATE links
 SET is_deleted = TRUE
-WHERE id = $1
+WHERE slug = $1
     AND is_deleted = FALSE
 RETURNING *;
 -- name: IncrementTotalClicksSince :exec

@@ -12,18 +12,13 @@ import (
 )
 
 const createLink = `-- name: CreateLink :one
-INSERT INTO links (slug, original_url)
-VALUES ($1, $2)
+INSERT INTO links (original_url)
+VALUES ($1)
 RETURNING id, slug, original_url, total_clicks, created_at, is_deleted
 `
 
-type CreateLinkParams struct {
-	Slug        string `json:"slug"`
-	OriginalUrl string `json:"original_url"`
-}
-
-func (q *Queries) CreateLink(ctx context.Context, arg CreateLinkParams) (Link, error) {
-	row := q.db.QueryRow(ctx, createLink, arg.Slug, arg.OriginalUrl)
+func (q *Queries) CreateLink(ctx context.Context, originalUrl string) (Link, error) {
+	row := q.db.QueryRow(ctx, createLink, originalUrl)
 	var i Link
 	err := row.Scan(
 		&i.ID,
@@ -64,7 +59,7 @@ WHERE slug = $1
     AND is_deleted = FALSE
 `
 
-func (q *Queries) GetLinkBySlug(ctx context.Context, slug string) (Link, error) {
+func (q *Queries) GetLinkBySlug(ctx context.Context, slug pgtype.Text) (Link, error) {
 	row := q.db.QueryRow(ctx, getLinkBySlug, slug)
 	var i Link
 	err := row.Scan(
@@ -99,13 +94,39 @@ func (q *Queries) IncrementTotalClicksSince(ctx context.Context, clickedAt pgtyp
 const softDeleteLink = `-- name: SoftDeleteLink :one
 UPDATE links
 SET is_deleted = TRUE
-WHERE id = $1
+WHERE slug = $1
     AND is_deleted = FALSE
 RETURNING id, slug, original_url, total_clicks, created_at, is_deleted
 `
 
-func (q *Queries) SoftDeleteLink(ctx context.Context, id int64) (Link, error) {
-	row := q.db.QueryRow(ctx, softDeleteLink, id)
+func (q *Queries) SoftDeleteLink(ctx context.Context, slug pgtype.Text) (Link, error) {
+	row := q.db.QueryRow(ctx, softDeleteLink, slug)
+	var i Link
+	err := row.Scan(
+		&i.ID,
+		&i.Slug,
+		&i.OriginalUrl,
+		&i.TotalClicks,
+		&i.CreatedAt,
+		&i.IsDeleted,
+	)
+	return i, err
+}
+
+const updateLinkSlug = `-- name: UpdateLinkSlug :one
+UPDATE links
+SET slug = $1
+WHERE id = $2
+RETURNING id, slug, original_url, total_clicks, created_at, is_deleted
+`
+
+type UpdateLinkSlugParams struct {
+	Slug pgtype.Text `json:"slug"`
+	ID   int64       `json:"id"`
+}
+
+func (q *Queries) UpdateLinkSlug(ctx context.Context, arg UpdateLinkSlugParams) (Link, error) {
+	row := q.db.QueryRow(ctx, updateLinkSlug, arg.Slug, arg.ID)
 	var i Link
 	err := row.Scan(
 		&i.ID,
