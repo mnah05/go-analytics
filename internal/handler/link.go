@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,13 +9,19 @@ import (
 
 	"go-analytics/internal/db"
 	"go-analytics/internal/helper"
+	"go-analytics/internal/queue"
+	"go-analytics/internal/scheduler"
+	"go-analytics/internal/tasks"
 	"go-analytics/internal/validator"
 	"go-analytics/pkg/logger"
 
 	"github.com/go-chi/chi/v5"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
 	"github.com/sqids/sqids-go"
 )
 
@@ -22,14 +29,16 @@ type LinkHandler struct {
 	db        *db.Queries
 	pool      *pgxpool.Pool
 	redis     *redis.Client
+	scheduler *scheduler.Client
 	shortener *sqids.Sqids
 }
 
-func NewLinkHandler(pool *pgxpool.Pool, redis *redis.Client, salt uint64) *LinkHandler {
+func NewLinkHandler(pool *pgxpool.Pool, redis *redis.Client, scheduler *scheduler.Client, salt uint64) *LinkHandler {
 	return &LinkHandler{
 		db:        db.New(pool),
 		pool:      pool,
 		redis:     redis,
+		scheduler: scheduler,
 		shortener: helper.NewShortener(salt),
 	}
 }
@@ -98,25 +107,56 @@ func (h *LinkHandler) GetLink(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	log := logger.FromChiContext(r.Context())
 
+	// Resolve the target URL from cache or DB
+	var targetURL string
 	redisKey := fmt.Sprintf("link:%s", slug)
+
 	cachedURL, err := h.redis.Get(r.Context(), redisKey).Result()
 	if err == nil {
-		http.Redirect(w, r, cachedURL, http.StatusFound)
-		return
+		targetURL = cachedURL
+	} else {
+		link, err := h.db.GetLinkBySlug(r.Context(), pgtype.Text{String: slug, Valid: true})
+		if err != nil {
+			log.Error().Err(err).Msg("failed to get link")
+			NewErrorResponse(w, http.StatusNotFound, "link not found", err.Error())
+			return
+		}
+		targetURL = link.OriginalUrl
+
+		if err := h.redis.Set(r.Context(), redisKey, targetURL, 30*24*time.Hour).Err(); err != nil {
+			log.Error().Err(err).Msg("failed to set link in redis")
+		}
 	}
 
-	link, err := h.db.GetLinkBySlug(r.Context(), pgtype.Text{String: slug, Valid: true})
+	// Fire-and-forget: enqueue click tracking task
+	go h.enqueueClickTrack(r, slug, log)
+
+	http.Redirect(w, r, targetURL, http.StatusFound)
+}
+
+func (h *LinkHandler) enqueueClickTrack(r *http.Request, slug string, log zerolog.Logger) {
+	payload := tasks.ClickTrackPayload{
+		Slug:      slug,
+		IpAddress: r.RemoteAddr,
+		UserAgent: r.UserAgent(),
+		Referer:   r.Referer(),
+		RequestID: chimiddleware.GetReqID(r.Context()),
+		ClickedAt: time.Now().UTC(),
+	}
+
+	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to get link")
-		NewErrorResponse(w, http.StatusNotFound, "link not found", err.Error())
+		log.Error().Err(err).Msg("failed to marshal click track payload")
 		return
 	}
 
-	if err := h.redis.Set(r.Context(), redisKey, link.OriginalUrl, 30*24*time.Hour).Err(); err != nil {
-		log.Error().Err(err).Msg("failed to set link in redis")
+	if err := h.scheduler.Enqueue(context.Background(), tasks.TypeClickTrack, payloadBytes,
+		asynq.Queue(queue.QueueDefault),
+		asynq.MaxRetry(5),
+		asynq.Timeout(30*time.Second),
+	); err != nil {
+		log.Error().Err(err).Msg("failed to enqueue click track task")
 	}
-
-	http.Redirect(w, r, link.OriginalUrl, http.StatusFound)
 }
 
 func (h *LinkHandler) DeleteLink(w http.ResponseWriter, r *http.Request) {

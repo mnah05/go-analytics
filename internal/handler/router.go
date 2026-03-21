@@ -41,7 +41,7 @@ func NewRouter(log zerolog.Logger, cfg *config.Config, db *pgxpool.Pool, redis *
 
 	health := NewHealthHandler(db, redis, cfg.HealthCheckTimeout)
 	worker := NewWorkerHandler(scheduler, db, redis)
-	link := NewLinkHandler(db, redis, idSalt)
+	link := NewLinkHandler(db, redis, scheduler, idSalt)
 
 	r.Get("/health", health.Check)
 

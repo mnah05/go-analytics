@@ -6,15 +6,15 @@ import (
 )
 
 type ErrorResponse struct {
-	Error   string      `json:"error"`
-	Message string      `json:"message,omitempty"`
-	Details interface{} `json:"details,omitempty"`
+	Error   string `json:"error"`
+	Message string `json:"message,omitempty"`
+	Details any    `json:"details,omitempty"`
 }
 
 type SuccessResponse struct {
-	Success bool        `json:"success"`
-	Data    interface{} `json:"data,omitempty"`
-	Message string      `json:"message,omitempty"`
+	Success bool   `json:"success"`
+	Data    any    `json:"data,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 func NewErrorResponse(w http.ResponseWriter, statusCode int, error string, message string) {
@@ -26,7 +26,7 @@ func NewErrorResponse(w http.ResponseWriter, statusCode int, error string, messa
 	})
 }
 
-func NewErrorResponseWithDetails(w http.ResponseWriter, statusCode int, error string, message string, details interface{}) {
+func NewErrorResponseWithDetails(w http.ResponseWriter, statusCode int, error string, message string, details any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(ErrorResponse{
@@ -36,7 +36,7 @@ func NewErrorResponseWithDetails(w http.ResponseWriter, statusCode int, error st
 	})
 }
 
-func NewSuccessResponse(w http.ResponseWriter, statusCode int, data interface{}, message string) {
+func NewSuccessResponse(w http.ResponseWriter, statusCode int, data any, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(SuccessResponse{

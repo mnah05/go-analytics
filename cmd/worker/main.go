@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,6 +18,7 @@ import (
 	"go-analytics/pkg/logger"
 
 	"github.com/hibiken/asynq"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/rs/zerolog"
 )
 
@@ -92,6 +95,97 @@ func main() {
 		logEvent.
 			Str("task_type", t.Type()).
 			Msg("worker ping task processed - worker is alive!")
+		return nil
+	})
+
+	queries := db.New(pool)
+
+	mux.HandleFunc(tasks.TypeClickTrack, func(ctx context.Context, t *asynq.Task) error {
+		var payload tasks.ClickTrackPayload
+		if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+			logg.Error().Err(err).Msg("failed to unmarshal click track payload")
+			return fmt.Errorf("unmarshal click track payload: %w", err)
+		}
+
+		rw := t.ResultWriter()
+		if rw == nil {
+			logg.Error().Str("slug", payload.Slug).Msg("cannot resolve task ID, skipping to retry")
+			return fmt.Errorf("task result writer is nil, cannot determine task ID")
+		}
+		taskID := rw.TaskID()
+
+		log := logg.With().
+			Str("request_id", payload.RequestID).
+			Str("slug", payload.Slug).
+			Str("task_id", taskID).
+			Logger()
+
+		// Idempotency check: skip if already processed
+		processed, err := queries.IsEventProcessed(ctx, taskID)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to check processed event")
+			return fmt.Errorf("check processed event: %w", err)
+		}
+		if processed {
+			log.Info().Msg("task already processed, skipping")
+			return nil
+		}
+
+		link, err := queries.GetLinkBySlug(ctx, pgtype.Text{String: payload.Slug, Valid: true})
+		if err != nil {
+			log.Error().Err(err).Msg("failed to get link by slug")
+			return fmt.Errorf("get link by slug: %w", err)
+		}
+
+		// Parse IP address (strip port if present)
+		var ipAddr *netip.Addr
+		if payload.IpAddress != "" {
+			host := payload.IpAddress
+			if h, _, err := net.SplitHostPort(host); err == nil {
+				host = h
+			}
+			if parsed, err := netip.ParseAddr(host); err == nil {
+				ipAddr = &parsed
+			}
+		}
+
+		// Transaction: insert click log + mark as processed atomically
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to begin transaction")
+			return fmt.Errorf("begin transaction: %w", err)
+		}
+		defer tx.Rollback(ctx)
+
+		qtx := queries.WithTx(tx)
+
+		_, err = qtx.InsertClickLog(ctx, db.InsertClickLogParams{
+			LinkID:    link.ID,
+			IpAddress: ipAddr,
+			Referer:   pgtype.Text{String: payload.Referer, Valid: payload.Referer != ""},
+			UserAgent: pgtype.Text{String: payload.UserAgent, Valid: payload.UserAgent != ""},
+			ClickedAt: pgtype.Timestamptz{Time: payload.ClickedAt, Valid: true},
+		})
+		if err != nil {
+			log.Error().Err(err).Msg("failed to insert click log")
+			return fmt.Errorf("insert click log: %w", err)
+		}
+
+		err = qtx.MarkEventProcessed(ctx, db.MarkEventProcessedParams{
+			TaskID:  taskID,
+			JobType: tasks.TypeClickTrack,
+		})
+		if err != nil {
+			log.Error().Err(err).Msg("failed to mark event processed")
+			return fmt.Errorf("mark event processed: %w", err)
+		}
+
+		if err = tx.Commit(ctx); err != nil {
+			log.Error().Err(err).Msg("failed to commit transaction")
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+
+		log.Info().Int64("link_id", link.ID).Msg("click tracked")
 		return nil
 	})
 
