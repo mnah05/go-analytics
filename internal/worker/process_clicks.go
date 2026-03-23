@@ -36,7 +36,7 @@ func NewClickProcessor(rdb *redis.Client, pool *pgxpool.Pool, queries *db.Querie
 	}
 }
 
-func (cp *ClickProcessor) ProcessPendingClicks(ctx context.Context) error {
+func (cp *ClickProcessor) ProcessPendingClicks(ctx context.Context) (err error) {
 	consumerID := getConsumerID()
 
 	messages, err := redisstream.ReadPendingClicks(ctx, cp.rdb, consumerID, batchSize)
@@ -115,7 +115,14 @@ func (cp *ClickProcessor) ProcessPendingClicks(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+
+	defer func() {
+		if err != nil {
+			if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+				cp.logg.Error().Err(rollbackErr).Msg("failed to rollback transaction")
+			}
+		}
+	}()
 
 	qtx := cp.queries.WithTx(tx)
 
