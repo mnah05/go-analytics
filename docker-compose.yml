@@ -18,7 +18,7 @@ services:
   #     retries: 5
 
   redis:
-    image: redis:7-alpine
+    image: redis:8.6.1-alpine
     container_name: go_redis
     restart: always
     ports:
