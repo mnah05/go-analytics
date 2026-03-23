@@ -1,7 +1,7 @@
 # URL Shortener with Analytics
 
 A URL shortener that tracks every click, including geolocation, referrers, and real-time analytics.
-Learn PostgreSQL scaling, Asynq background jobs, and Redis patterns. Build this in 3–4 days.
+Built with Go, PostgreSQL, Redis Streams, and Asynq.
 
 ---
 
@@ -14,218 +14,251 @@ their country, what site referred them, their device type, and when they clicked
 
 ---
 
+## Architecture
+
+```
+┌────────────┐     ┌────────────┐     ┌───────────────┐
+│   Client   │────▶│  API (Chi) │────▶│  PostgreSQL   │
+│            │     │  :8080     │     │  (pgx pool)   │
+└────────────┘     └─────┬──────┘     └───────────────┘
+                         │                    ▲
+                    XADD │ click              │ batch INSERT
+                    to   │ event              │ (every 5s)
+                    Redis│                    │
+                         ▼                    │
+                   ┌───────────┐      ┌──────┴────────┐
+                   │  Redis    │◀────▶│ Worker (Asynq) │
+                   │  Stream   │      │ + Scheduler    │
+                   └───────────┘      └───────────────┘
+```
+
+**Two processes:**
+- `make api` — HTTP server (Chi router, port 8080)
+- `make worker` — Asynq worker server + cron scheduler
+
+---
+
 ## Core Flows
 
 ### 1. Create Short Link
 
 ```
-POST /api/links
-{ "url": "<https://very-long-url.com/something>" }
-→ Returns: { "short_url": "mysite.com/abc123", "slug": "abc123" }
+POST /links/
+{ "url": "https://very-long-url.com/something" }
+→ Returns: { "id": 123, "slug": "abc123", "original_url": "..." }
 ```
+
+Slug is generated via [Sqids](https://sqids.org/) from the link's numeric ID. Cached in Redis (30-day TTL).
 
 ### 2. Visit Short Link (The Critical Path)
 
 ```
 GET /abc123
-→ Check Redis rate limit (prevent spam)
-→ Lookup original URL from PostgreSQL
-→ Enqueue "track this click" job to Asynq (async, don't wait)
+→ Check Redis cache for original URL (faster than DB)
+→ If miss: query PostgreSQL, populate cache
+→ Fire-and-forget: XADD click event to Redis Stream
 → 302 Redirect to original URL
 ```
 
-**Must complete in under 50ms.**
+**Rate limited at HTTP layer:** 10 req/s per IP via `httprate`.
 
 ### 3. Background Processing (Async)
 
 ```
-Asynq Worker receives click job
-→ Geolocate IP → country code
-→ Buffer to Redis list
-→ Every 5 seconds: batch insert 1000 clicks to PostgreSQL
+Asynq Scheduler triggers cron:process_clicks every 5s
+→ XREADGROUP from Redis Stream (consumer group "click-workers")
+→ Parse up to 1000 messages per batch
+→ Batch INSERT into click_logs (single transaction)
+→ XACK processed messages
+```
+
+```
+Asynq Scheduler triggers cron:stats_aggregate (configurable cron)
+→ Aggregate click_logs into daily_stats (clicks, unique visitors)
+→ Build country and referrer JSONB breakdowns
+→ Increment links.total_clicks
+→ Idempotent via Redis key (stats:processed:{date})
 ```
 
 ### 4. View Analytics
 
 ```
-GET /api/links/abc123/stats
-→ Query pre-computed daily rollups (fast)
-→ Return: { "total_clicks": 5000, "by_country": {...}, "by_referrer": {...} }
+GET /links/{slug}/stats?start=2026-01-01&end=2026-03-31
+→ Query pre-computed daily_stats (fast reads)
+→ Return: { "total_clicks": 5000, "daily": [...], "countries": {...}, "referers": {...} }
 ```
 
 ---
 
 ## Why This Architecture
 
-| Problem                | Solution                                                        |
-| ---------------------- | --------------------------------------------------------------- |
-| Redirect must be fast  | Don't wait for click tracking—enqueue an async job              |
-| Too many DB writes     | Buffer to Redis, then batch insert with COPY                    |
-| Analytics queries slow | Pre-compute daily summaries, and have the dashboard query those |
-| Rate limiting          | Redis sliding window—check before touching PostgreSQL           |
+| Problem                | Solution                                                   |
+| ---------------------- | ---------------------------------------------------------- |
+| Redirect must be fast  | Redis cache lookup + fire-and-forget to stream (not DB)    |
+| Too many DB writes     | Buffer via Redis Stream, batch INSERT in 5s cron cycles    |
+| Analytics queries slow | Pre-computed daily_stats rollups (scan ~30 rows, not millions) |
+| Rate limiting          | In-memory `httprate` (10 req/s per IP) before touching DB  |
+| Idempotency            | Redis key `stats:processed:{date}` prevents double-aggregation |
 
 ---
 
-## Database Tables
+## API Endpoints
+
+| Method | Path                    | Purpose                    |
+| ------ | ----------------------- | -------------------------- |
+| GET    | `/health`               | DB + Redis + stream health |
+| POST   | `/links/`               | Create short link          |
+| DELETE | `/links/{slug}`         | Soft-delete link           |
+| GET    | `/links/{slug}/stats`   | Analytics for a link       |
+| GET    | `/{slug}`               | 302 redirect               |
+| GET    | `/worker/health`        | Worker health check        |
+| GET    | `/worker/status`        | Worker queue details       |
+| POST   | `/worker/ping`          | Enqueue test ping task     |
+
+---
+
+## Database Schema
 
 ```sql
 -- Short links
 CREATE TABLE links (
-    id UUID PRIMARY KEY,
-    slug VARCHAR(16) UNIQUE NOT NULL,        -- "abc123"
-    original_url TEXT NOT NULL,               -- where to redirect
-    total_clicks BIGINT DEFAULT 0,            -- cached counter
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    deleted_at TIMESTAMPTZ                    -- soft delete
+    id BIGSERIAL PRIMARY KEY,
+    slug CHAR(11) UNIQUE DEFAULT '',          -- sqids-generated, 11 chars
+    original_url TEXT NOT NULL,                -- where to redirect
+    total_clicks BIGINT NOT NULL DEFAULT 0,    -- cached counter (bumped by aggregator)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_deleted BOOLEAN NOT NULL DEFAULT FALSE  -- soft delete
 );
 
--- Individual clicks (huge table, heavy writes)
+-- Individual clicks (high-write table)
 CREATE TABLE click_logs (
-    id UUID PRIMARY KEY,
-    link_id UUID REFERENCES links(id),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    link_id BIGINT NOT NULL REFERENCES links(id),
     ip_address INET,
-    country_code VARCHAR(2),                  -- "US", "IN"
+    referer TEXT,
+    country VARCHAR(2),                        -- not currently populated (geolocation not implemented)
     user_agent TEXT,
-    referrer TEXT,
-    clicked_at TIMESTAMPTZ DEFAULT NOW()
+    clicked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_click_logs_link_clicked ON click_logs(link_id, clicked_at);
-CREATE INDEX idx_click_logs_clicked ON click_logs(clicked_at);
+CREATE INDEX idx_click_logs_link_clicked ON click_logs(link_id, clicked_at DESC);
+CREATE INDEX idx_click_logs_clicked ON click_logs(clicked_at DESC);
 
 -- Daily summaries (small table, fast reads)
 CREATE TABLE daily_stats (
-    link_id UUID REFERENCES links(id),
+    link_id BIGINT NOT NULL REFERENCES links(id),
     date DATE NOT NULL,
-    clicks BIGINT DEFAULT 0,
-    unique_visitors BIGINT DEFAULT 0,
-    top_countries JSONB,                    -- {"US": 500, "IN": 300}
-    top_referrers JSONB,
+    clicks BIGINT NOT NULL DEFAULT 0,
+    unique_visitors BIGINT NOT NULL DEFAULT 0,
+    countries JSONB NOT NULL DEFAULT '{}',     -- {"US": 500, "IN": 300}
+    referers JSONB NOT NULL DEFAULT '{}',      -- {"google.com": 200, "twitter.com": 100}
     PRIMARY KEY (link_id, date)
 );
 
-CREATE INDEX idx_daily_stats_date ON daily_stats(date DESC);
-
--- Prevent duplicate job processing
-CREATE TABLE processed_events (
-    event_id VARCHAR(64) PRIMARY KEY,         -- Asynq task ID
-    job_type VARCHAR(32),
-    processed_at TIMESTAMPTZ DEFAULT NOW()
-);
+CREATE INDEX idx_daily_stats_link_date ON daily_stats(link_id, date DESC);
 ```
 
 ---
 
-## Day-by-Day Build
+## Redis Usage
 
-### Day 1: Links + Redirects
-
-**Morning:**
-
-- Setup Go project with Chi router
-- Create `links` table
-- `POST /api/links` — generate a random slug and store the URL
-- `GET /:slug` — look up the URL and return a 302 redirect
-
-**Afternoon:**
-
-- Add a slug uniqueness check with a retry loop
-- Add basic Redis rate limiting (sliding window on IP)
-- Test: Create a link, visit it, and confirm it redirects
-
-### Day 2: Async Click Tracking
-
-**Morning:**
-
-- Setup Asynq
-- On redirect: enqueue a "track_click" job instead of inserting directly
-- Create `click_logs` table
-
-**Afternoon:**
-
-- Implement click processor worker
-- Add geolocation (use free MaxMind GeoLite2 or mock it)
-- Buffer clicks to a Redis list instead of inserting immediately
-
-**Evening:**
-
-- Batch drainer job: every 5 seconds, LPOP 1000 from Redis, COPY to PostgreSQL
-- Test: Visit a link 100 times and verify clicks land in the DB via batch insert
-
-### Day 3: Analytics + Dashboard
-
-**Morning:**
-
-- Setup Asynq server with 2 cron jobs:
-  **Job A: Batch Inserter** (runs every 5 seconds)
-  ```go
-  // Register the handler
-  mux.HandleFunc("batch_inserter", batchInserterHandler)
-
-  // Schedule it: every 5 seconds
-  scheduler.Register("*/5 * * * * *", "batch_inserter", nil)
-  ```
-  What it does: Drains Redis buffer and batch inserts to PostgreSQL via COPY
-  **Job B: Daily Rollup** (runs every 5 minutes for dev, 1 AM for prod)
-  ```go
-  // For development - every 5 minutes so you can see results
-  scheduler.Register("*/5 * * * *", "rollup_job", nil)
-
-  // For production - daily at 1 AM
-  // scheduler.Register("0 1 * * *", "rollup_job", nil)
-  ```
-  What it does: Aggregates `click_logs` → `daily_stats` for the dashboard
-- Test cron jobs with simple log output to verify they're firing
-
-**Afternoon:**
-
-- `GET /api/links/:slug/stats` — query `daily_stats`
-- Build a simple HTML dashboard showing:
-  - Total clicks
-  - Clicks over time (line chart)
-  - Top countries (bar chart)
-  - Top referrers (pie chart)
-
-**Evening:**
-
-- Auto-refresh dashboard every 30 seconds
-- Add a "last 24 hours" view vs "all time" toggle
-
-### Day 4: Polish + Load Test
-
-**Morning:**
-
-- Add `processed_events` table for idempotency
-- Handle edge cases: deleted links, invalid slugs, rate limit exceeded
-
-**Afternoon:**
-
-- Load test with k6: 1000 redirects/second for 60 seconds
-- Verify PostgreSQL handles it (check connection pool, batch inserts working)
-- Check dashboard accuracy matches raw click count
+| Pattern        | Key                    | Type       | Purpose                             |
+| -------------- | ---------------------- | ---------- | ----------------------------------- |
+| Link cache     | `link:{slug}`          | String     | 30-day TTL cache of original URL    |
+| Click stream   | `clicks:stream`        | Stream     | Async click event buffer (max 100k) |
+| Idempotency    | `stats:processed:{id}` | Key (7d)   | Prevents duplicate aggregation      |
+| Stream metrics | `clicks:stream`        | Stream     | XLEN + XPENDING for health checks   |
 
 ---
 
-## Key Patterns Explained
+## Worker Schedules (Asynq Scheduler)
 
-### Batch Insert via COPY
+| Task Type                 | Default Schedule | Purpose                                           |
+| ------------------------- | ---------------- | ------------------------------------------------- |
+| `worker:ping`             | `@every 30s`     | Heartbeat — verifies worker is alive              |
+| `cron:process_clicks`     | `@every 5s`      | Drain Redis Stream → batch INSERT into click_logs |
+| `cron:stats_aggregate`    | `@every 30s`     | Aggregate click_logs → daily_stats                |
 
-Instead of:
+Stats aggregate schedule is configurable via `STATS_AGGREGATE_CRON` env var. For production, use `0 1 * * *` (daily at 1 AM).
 
-```go
-for _, click := range clicks {
-    db.Exec("INSERT...", click)  -- 1000 round trips!
-}
+---
+
+## Setup
+
+### Prerequisites
+
+- Go 1.25+
+- PostgreSQL
+- Redis
+- [golang-migrate](https://github.com/golang-migrate/migrate) CLI
+- [sqlc](https://sqlc.dev/) (only if modifying SQL queries)
+
+### 1. Configure environment
+
+```bash
+cp .env.example .env
+# Edit .env with your database and redis credentials
 ```
 
-Use:
+Required env vars:
+
+| Variable              | Description                         |
+| --------------------- | ----------------------------------- |
+| `DATABASE_URL`        | PostgreSQL connection string        |
+| `REDIS_ADDR`          | Redis address (e.g. `localhost:6379`) |
+| `URL_SHORTENER_SALT`  | Numeric salt for Sqids slug generation |
+| `APP_PORT`            | API port (default: 8080)            |
+| `STATS_AGGREGATE_CRON`| Cron for stats aggregation          |
+
+### 2. Run migrations
+
+```bash
+make migrate-up
+```
+
+### 3. Start services
+
+```bash
+# Terminal 1: API server
+make api
+
+# Terminal 2: Worker + scheduler
+make worker
+```
+
+### 4. Start Redis (via Docker)
+
+```bash
+make dev
+```
+
+---
+
+## Key Patterns
+
+### Click Flow (Redis Stream)
+
+Instead of writing to PostgreSQL on every redirect (expensive), clicks are buffered to a Redis Stream:
 
 ```go
-copyFrom := pgx.CopyFromSlice(len(clicks), func(i int) ([]interface{}, error) {
-    return []interface{}{clicks[i].ID, clicks[i].LinkID, ...}, nil
+// API side — fire and forget, doesn't block redirect
+h.redis.XAdd(ctx, &redis.XAddArgs{
+    Stream: "clicks:stream",
+    MaxLen: 100000,
+    Approx: true,
+    Values: map[string]interface{}{"data": payloadJSON},
 })
-conn.CopyFrom(ctx, pgx.Identifier{"click_logs"}, columns, copyFrom)
-// 1 round trip, 10-100x faster
+```
+
+```go
+// Worker side — batch drain every 5s
+messages, _ := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+    Group: "click-workers",
+    Consumer: consumerID,
+    Streams: []string{"clicks:stream", ">"},
+    Count: 1000,
+})
+// Insert all messages in a single transaction
 ```
 
 ### Why Pre-Computed Rollups?
@@ -248,39 +281,77 @@ WHERE link_id = '...' AND date > NOW() - INTERVAL '30 days';
 -- Scans ~30 rows, instant
 ```
 
-### Redis Sliding Window Rate Limit
+---
+
+## Project Structure
 
 ```
-Key: rate_limit:ip:192.168.1.1 (sorted set)
-
-1. ZREMRANGEBYSCORE key 0 (now - 60s)  -- remove old entries
-2. ZCARD key                           -- count entries = current requests
-3. If count < 100:
-     ZADD key now now                   -- add current request
-     EXPIRE key 60s
-     ALLOW
-   Else:
-     REJECT
+go-analytics/
+├── cmd/
+│   ├── api/main.go              # HTTP server entrypoint
+│   └── worker/main.go           # Asynq worker + scheduler entrypoint
+├── internal/
+│   ├── config/config.go         # Env config with validation
+│   ├── db/                      # sqlc-generated types and queries
+│   ├── handler/                 # Chi HTTP handlers (link, stats, health, worker)
+│   ├── helper/shortener.go      # Sqids slug generation
+│   ├── middleware/logger.go     # Per-request zerolog in chi context
+│   ├── queue/queue.go           # Asynq queue priorities
+│   ├── redis/stream.go          # Redis Stream helpers (XADD, XREADGROUP, XACK)
+│   ├── scheduler/client.go      # Asynq client wrapper
+│   ├── tasks/tasks.go           # Task type constants + payloads
+│   ├── validator/validator.go   # go-playground/validator wrapper
+│   └── worker/
+│       ├── process_clicks.go    # Stream → batch INSERT into click_logs
+│       └── stats_aggregate.go   # click_logs → daily_stats rollup
+├── migrations/                  # golang-migrate SQL files
+├── sql/
+│   ├── schema.sql               # Canonical DDL for sqlc
+│   └── queries/                 # SQL query definitions for sqlc
+├── pkg/logger/                  # Zerolog factory
+├── docker-compose.yml           # Redis (PostgreSQL commented out)
+├── Makefile                     # Build, migrate, sqlc, dev commands
+├── sqlc.yaml                    # sqlc config
+└── .env.example                 # Environment template
 ```
 
-Atomic, no race conditions.
+---
+
+## What's Not Implemented
+
+| Feature                  | Status |
+| ------------------------ | ------ |
+| Geolocation (IP → country) | Not implemented — `country` column is always NULL |
+| `pgx.CopyFrom` batch insert | Not used — individual INSERT statements in a transaction |
+| Redis sliding window rate limit | Not used — in-memory `httprate` instead |
+| Dashboard / frontend     | Not built |
+| Tests                    | None (were deleted in `8cf578a`) |
+| Custom slugs             | Stretch goal |
+| Link expiration          | Stretch goal |
+| CSV export               | Stretch goal |
+| Password-protected links | Stretch goal |
+| k6 load tests            | Not created |
 
 ---
 
 ## Stretch Goals
 
-1. **Custom slugs** — `POST /api/links { "slug": "my-sale" }`
+1. **Custom slugs** — `POST /links/ { "slug": "my-sale" }`
 2. **Link expiration** — auto-delete after date
 3. **CSV export** — async job generates download
 4. **Password-protected links**
+5. **Geolocation** — MaxMind GeoLite2 or similar for IP-to-country
+6. **Dashboard** — HTML/JS with charts (clicks over time, top countries, referrers)
+7. **Redis-based rate limiting** — sliding window for multi-instance deployments
+8. **Tests** — unit + integration tests
 
 ---
 
 ## Testing Checklist
 
 - [ ] Create link, redirect works
-- [ ] Rate limit blocks after 100 req/min
-- [ ] 1000 rapid clicks all tracked (no lost data)
-- [ ] Dashboard shows correct totals
-- [ ] Daily stats update after aggregator runs
-- [ ] Works under k6 load test
+- [ ] Rate limit blocks after 10 req/s per IP
+- [ ] Clicks tracked via Redis Stream and batch-inserted to DB
+- [ ] Stats endpoint returns correct totals from daily_stats
+- [ ] Stats aggregator runs and populates daily_stats
+- [ ] Worker health/status endpoints respond correctly
