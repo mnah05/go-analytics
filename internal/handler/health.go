@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	redisstream "go-analytics/internal/redis"
 	"go-analytics/pkg/logger"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -52,12 +53,25 @@ func (h *HealthHandler) Check(w http.ResponseWriter, r *http.Request) {
 		overall = http.StatusServiceUnavailable
 	}
 
+	streamMetrics, err := redisstream.GetStreamMetrics(ctx, h.redis)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to get stream metrics")
+	}
+
 	duration := time.Since(start)
 
 	response := map[string]any{
 		"status":   status,
 		"checked":  time.Now().UTC(),
 		"duration": duration.Milliseconds(),
+	}
+
+	if streamMetrics != nil {
+		response["stream"] = map[string]any{
+			"stream_length":  streamMetrics.StreamLength,
+			"pending_count":  streamMetrics.PendingCount,
+			"consumer_names": streamMetrics.ConsumerNames,
+		}
 	}
 
 	dbStatus := status["database"]

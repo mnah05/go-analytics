@@ -33,9 +33,3 @@ CREATE TABLE daily_stats (
 );
 
 CREATE INDEX idx_daily_stats_link_date ON daily_stats (link_id, date DESC);
-
-CREATE TABLE processed_events (
-    task_id TEXT PRIMARY KEY,
-    job_type TEXT NOT NULL,
-    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW ()
-);

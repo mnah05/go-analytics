@@ -7,7 +7,9 @@ import "time"
 const (
 	// TypeWorkerPing is used to verify the worker is alive and processing tasks.
 	TypeWorkerPing = "worker:ping"
-	TypeClickTrack = "click:tracking"
+	// TypeProcessPendingClicks is triggered by asynq scheduler every 5 seconds
+	// to batch process clicks from the Redis stream.
+	TypeProcessPendingClicks = "cron:process_clicks"
 )
 
 // PingTaskPayload is the payload for the worker ping task, including correlation ID.

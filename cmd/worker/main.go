@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
-	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,11 +12,13 @@ import (
 	"go-analytics/internal/config"
 	"go-analytics/internal/db"
 	"go-analytics/internal/queue"
+	redisstream "go-analytics/internal/redis"
 	"go-analytics/internal/tasks"
+	"go-analytics/internal/worker"
 	"go-analytics/pkg/logger"
 
 	"github.com/hibiken/asynq"
-	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 )
 
@@ -50,6 +50,18 @@ func main() {
 		Password: cfg.RedisPassword,
 		DB:       cfg.RedisDB,
 	}
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     cfg.RedisAddr,
+		Password: cfg.RedisPassword,
+		DB:       cfg.RedisDB,
+	})
+
+	if err := redisstream.EnsureStreamExists(ctx, rdb); err != nil {
+		logg.Error().Err(err).Msg("failed to ensure stream exists")
+		return
+	}
+	logg.Info().Msg("redis stream initialized")
 
 	srv := asynq.NewServer(
 		redisOpt,
@@ -99,102 +111,41 @@ func main() {
 	})
 
 	queries := db.New(pool)
+	clickProcessor := worker.NewClickProcessor(rdb, pool, queries, logg)
 
-	mux.HandleFunc(tasks.TypeClickTrack, func(ctx context.Context, t *asynq.Task) error {
-		var payload tasks.ClickTrackPayload
-		if err := json.Unmarshal(t.Payload(), &payload); err != nil {
-			logg.Error().Err(err).Msg("failed to unmarshal click track payload")
-			return fmt.Errorf("unmarshal click track payload: %w", err)
-		}
-
-		rw := t.ResultWriter()
-		if rw == nil {
-			logg.Error().Str("slug", payload.Slug).Msg("cannot resolve task ID, skipping to retry")
-			return fmt.Errorf("task result writer is nil, cannot determine task ID")
-		}
-		taskID := rw.TaskID()
-
-		log := logg.With().
-			Str("request_id", payload.RequestID).
-			Str("slug", payload.Slug).
-			Str("task_id", taskID).
-			Logger()
-
-		// Idempotency check: skip if already processed
-		processed, err := queries.IsEventProcessed(ctx, taskID)
-		if err != nil {
-			log.Error().Err(err).Msg("failed to check processed event")
-			return fmt.Errorf("check processed event: %w", err)
-		}
-		if processed {
-			log.Info().Msg("task already processed, skipping")
-			return nil
-		}
-
-		link, err := queries.GetLinkBySlug(ctx, pgtype.Text{String: payload.Slug, Valid: true})
-		if err != nil {
-			log.Error().Err(err).Msg("failed to get link by slug")
-			return fmt.Errorf("get link by slug: %w", err)
-		}
-
-		// Parse IP address (strip port if present)
-		var ipAddr *netip.Addr
-		if payload.IpAddress != "" {
-			host := payload.IpAddress
-			if h, _, err := net.SplitHostPort(host); err == nil {
-				host = h
-			}
-			if parsed, err := netip.ParseAddr(host); err == nil {
-				ipAddr = &parsed
-			}
-		}
-
-		// Transaction: insert click log + mark as processed atomically
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			log.Error().Err(err).Msg("failed to begin transaction")
-			return fmt.Errorf("begin transaction: %w", err)
-		}
-		defer tx.Rollback(ctx)
-
-		qtx := queries.WithTx(tx)
-
-		_, err = qtx.InsertClickLog(ctx, db.InsertClickLogParams{
-			LinkID:    link.ID,
-			IpAddress: ipAddr,
-			Referer:   pgtype.Text{String: payload.Referer, Valid: payload.Referer != ""},
-			UserAgent: pgtype.Text{String: payload.UserAgent, Valid: payload.UserAgent != ""},
-			ClickedAt: pgtype.Timestamptz{Time: payload.ClickedAt, Valid: true},
-		})
-		if err != nil {
-			log.Error().Err(err).Msg("failed to insert click log")
-			return fmt.Errorf("insert click log: %w", err)
-		}
-
-		err = qtx.MarkEventProcessed(ctx, db.MarkEventProcessedParams{
-			TaskID:  taskID,
-			JobType: tasks.TypeClickTrack,
-		})
-		if err != nil {
-			log.Error().Err(err).Msg("failed to mark event processed")
-			return fmt.Errorf("mark event processed: %w", err)
-		}
-
-		if err = tx.Commit(ctx); err != nil {
-			log.Error().Err(err).Msg("failed to commit transaction")
-			return fmt.Errorf("commit transaction: %w", err)
-		}
-
-		log.Info().Int64("link_id", link.ID).Msg("click tracked")
-		return nil
+	mux.HandleFunc(tasks.TypeProcessPendingClicks, func(ctx context.Context, t *asynq.Task) error {
+		return clickProcessor.ProcessPendingClicks(ctx)
 	})
 
+	scheduler := asynq.NewScheduler(
+		redisOpt,
+		&asynq.SchedulerOpts{},
+	)
+
+	pingTask := asynq.NewTask(tasks.TypeWorkerPing, []byte(`{"message":"scheduled ping"}`))
+	if _, err := scheduler.Register("@every 30s", pingTask); err != nil {
+		logg.Error().Err(err).Msg("failed to register ping task")
+	}
+
+	processTask := asynq.NewTask(tasks.TypeProcessPendingClicks, nil)
+	if _, err := scheduler.Register("@every 5s", processTask, asynq.Queue(queue.QueueDefault), asynq.Unique(10*time.Second)); err != nil {
+		logg.Error().Err(err).Msg("failed to register process clicks task")
+	}
+
 	workerErrors := make(chan error, 1)
+	schedulerErrors := make(chan error, 1)
 
 	go func() {
 		logg.Info().Msg("worker starting")
 		if err := srv.Run(mux); err != nil {
 			workerErrors <- fmt.Errorf("worker failed to start: %w", err)
+		}
+	}()
+
+	go func() {
+		logg.Info().Msg("scheduler starting")
+		if err := scheduler.Run(); err != nil {
+			schedulerErrors <- fmt.Errorf("scheduler failed to start: %w", err)
 		}
 	}()
 
@@ -204,6 +155,8 @@ func main() {
 	select {
 	case err := <-workerErrors:
 		logg.Fatal().Err(err).Msg("worker startup failed")
+	case err := <-schedulerErrors:
+		logg.Fatal().Err(err).Msg("scheduler startup failed")
 	case sig := <-sigChan:
 		logg.Info().Str("signal", sig.String()).Msg("shutdown signal received")
 	}
@@ -211,6 +164,7 @@ func main() {
 	logg.Info().Msg("shutting down worker...")
 
 	srv.Stop()
+	scheduler.Shutdown()
 	logg.Info().Msg("worker stopped accepting new tasks")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.WorkerShutdownTimeout)
@@ -224,9 +178,9 @@ func main() {
 
 	select {
 	case <-done:
-		logg.Info().Msg("worker shutdown completed gracefully")
+		logg.Info().Msg("shutdown completed gracefully")
 	case <-shutdownCtx.Done():
-		logg.Warn().Msg("worker shutdown timed out, forcing exit")
+		logg.Warn().Msg("shutdown timed out, forcing exit")
 	}
 
 	logg.Info().Msg("worker stopped cleanly")

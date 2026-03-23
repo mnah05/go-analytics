@@ -75,10 +75,37 @@
 - [x] Wire task handler into worker's asynq mux (`cmd/worker/main.go`)
 - [x] Add sqlc queries: `InsertClickLog`, `GetClickLogsByLink`, `CountClickLogsByLink`
 
-## Phase 7: Analytics Aggregation (Stretch)
+## Phase 7: Analytics Aggregation
 
-- [ ] Periodic task to aggregate `click_logs` into `daily_stats`
-  - [ ] Group by link_id + date, count clicks, unique IPs
-  - [ ] Create sqlc query for upserting `daily_stats`
-- [ ] Update `IncrementTotalClicksSince` to run on a schedule (already exists as a query)
-- [ ] Expose analytics endpoint: `GET /links/{slug}/stats` → return click counts, daily breakdown
+### Step 1 — Task definition
+
+- [ ] Add `TypeStatsAggregate` constant in `internal/tasks/tasks.go`
+- [ ] Add `StatsAggregatePayload` struct: `StartAt time.Time`, `EndAt time.Time`, `RequestID string`
+
+### Step 2 — Aggregation worker handler
+
+- [ ] Register `TypeStatsAggregate` handler in `cmd/worker/main.go`
+- [ ] Idempotency: check `IsEventProcessed` → skip if already done
+- [ ] Call `UpsertDailyClicks(startAt, endAt)` — upserts clicks + unique visitors
+- [ ] Call `GetCountryStats(startAt, endAt)` → build `{"US": 5, "IN": 3}` JSONB in Go → `UpdateDailyCountries` per (link_id, date)
+- [ ] Call `GetRefererStats(startAt, endAt)` → build `{"twitter.com": 10}` JSONB in Go → `UpdateDailyReferers` per (link_id, date)
+- [ ] Call `IncrementTotalClicksSince(startAt)` — bumps `links.total_clicks`
+- [ ] Mark task as processed via `MarkEventProcessed` in a transaction
+- [ ] Log success/failure with request_id
+
+### Step 3 — Schedule the aggregation
+
+- [ ] Use asynq periodic task scheduler in `cmd/worker/main.go`
+- [ ] Schedule: daily at midnight UTC (or configurable via env `STATS_AGGREGATE_CRON`)
+- [ ] Payload: `StartAt` = yesterday 00:00 UTC, `EndAt` = today 00:00 UTC
+
+### Step 4 — Stats endpoint: `GET /links/{slug}/stats`
+
+- [ ] Create `internal/handler/stats.go` with `StatsHandler` struct (db pool, redis)
+- [ ] Implement `GetStats` handler:
+  - Resolve slug → link_id via `GetLinkBySlug`
+  - Call `GetLinkStatsSummary` for totals (total_clicks, total_unique_visitors)
+  - Call `GetDailyStatsByLink` for daily breakdown (query params: `start`, `end`, default last 30 days)
+  - Return `200` with `{ slug, total_clicks, total_unique_visitors, daily: [...] }`
+  - Return `404` if link not found
+- [ ] Register route: `GET /links/{slug}/stats` in `router.go` under `/links` group

@@ -9,19 +9,16 @@ import (
 
 	"go-analytics/internal/db"
 	"go-analytics/internal/helper"
-	"go-analytics/internal/queue"
-	"go-analytics/internal/scheduler"
+	redisstream "go-analytics/internal/redis"
 	"go-analytics/internal/tasks"
 	"go-analytics/internal/validator"
 	"go-analytics/pkg/logger"
 
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
-	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
-	"github.com/rs/zerolog"
 	"github.com/sqids/sqids-go"
 )
 
@@ -29,16 +26,14 @@ type LinkHandler struct {
 	db        *db.Queries
 	pool      *pgxpool.Pool
 	redis     *redis.Client
-	scheduler *scheduler.Client
 	shortener *sqids.Sqids
 }
 
-func NewLinkHandler(pool *pgxpool.Pool, redis *redis.Client, scheduler *scheduler.Client, salt uint64) *LinkHandler {
+func NewLinkHandler(pool *pgxpool.Pool, redis *redis.Client, salt uint64) *LinkHandler {
 	return &LinkHandler{
 		db:        db.New(pool),
 		pool:      pool,
 		redis:     redis,
-		scheduler: scheduler,
 		shortener: helper.NewShortener(salt),
 	}
 }
@@ -107,7 +102,6 @@ func (h *LinkHandler) GetLink(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	log := logger.FromChiContext(r.Context())
 
-	// Resolve the target URL from cache or DB
 	var targetURL string
 	redisKey := fmt.Sprintf("link:%s", slug)
 
@@ -128,13 +122,13 @@ func (h *LinkHandler) GetLink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Fire-and-forget: enqueue click tracking task
-	go h.enqueueClickTrack(r, slug, log)
+	go h.addClickToStream(r, slug)
 
 	http.Redirect(w, r, targetURL, http.StatusFound)
 }
 
-func (h *LinkHandler) enqueueClickTrack(r *http.Request, slug string, log zerolog.Logger) {
+func (h *LinkHandler) addClickToStream(r *http.Request, slug string) {
+	ctx := context.Background()
 	payload := tasks.ClickTrackPayload{
 		Slug:      slug,
 		IpAddress: r.RemoteAddr,
@@ -146,16 +140,19 @@ func (h *LinkHandler) enqueueClickTrack(r *http.Request, slug string, log zerolo
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to marshal click track payload")
 		return
 	}
 
-	if err := h.scheduler.Enqueue(context.Background(), tasks.TypeClickTrack, payloadBytes,
-		asynq.Queue(queue.QueueDefault),
-		asynq.MaxRetry(5),
-		asynq.Timeout(30*time.Second),
-	); err != nil {
-		log.Error().Err(err).Msg("failed to enqueue click track task")
+	if err := h.redis.XAdd(ctx, &redis.XAddArgs{
+		Stream: redisstream.StreamKey,
+		MaxLen: 100000,
+		Approx: true,
+		Values: map[string]interface{}{
+			"data": string(payloadBytes),
+		},
+	}).Err(); err != nil {
+		log := logger.FromChiContext(r.Context())
+		log.Error().Err(err).Msg("failed to add click to stream")
 	}
 }
 

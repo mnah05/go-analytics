@@ -67,6 +67,51 @@ func (q *Queries) GetClickLogsByLink(ctx context.Context, arg GetClickLogsByLink
 	return items, nil
 }
 
+const getCountryStats = `-- name: GetCountryStats :many
+SELECT link_id, clicked_at::date AS date, country, COUNT(*) AS cnt
+FROM click_logs
+WHERE clicked_at >= $1 AND clicked_at < $2
+    AND country IS NOT NULL
+GROUP BY link_id, clicked_at::date, country
+`
+
+type GetCountryStatsParams struct {
+	ClickedAt   pgtype.Timestamptz `json:"clicked_at"`
+	ClickedAt_2 pgtype.Timestamptz `json:"clicked_at_2"`
+}
+
+type GetCountryStatsRow struct {
+	LinkID  int64       `json:"link_id"`
+	Date    pgtype.Date `json:"date"`
+	Country pgtype.Text `json:"country"`
+	Cnt     int64       `json:"cnt"`
+}
+
+func (q *Queries) GetCountryStats(ctx context.Context, arg GetCountryStatsParams) ([]GetCountryStatsRow, error) {
+	rows, err := q.db.Query(ctx, getCountryStats, arg.ClickedAt, arg.ClickedAt_2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetCountryStatsRow
+	for rows.Next() {
+		var i GetCountryStatsRow
+		if err := rows.Scan(
+			&i.LinkID,
+			&i.Date,
+			&i.Country,
+			&i.Cnt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getDailyStatsByLink = `-- name: GetDailyStatsByLink :many
 SELECT link_id, date, clicks, unique_visitors, countries, referers
 FROM daily_stats
@@ -129,6 +174,51 @@ func (q *Queries) GetLinkStatsSummary(ctx context.Context, linkID int64) (GetLin
 	return i, err
 }
 
+const getRefererStats = `-- name: GetRefererStats :many
+SELECT link_id, clicked_at::date AS date, referer, COUNT(*) AS cnt
+FROM click_logs
+WHERE clicked_at >= $1 AND clicked_at < $2
+    AND referer IS NOT NULL
+GROUP BY link_id, clicked_at::date, referer
+`
+
+type GetRefererStatsParams struct {
+	ClickedAt   pgtype.Timestamptz `json:"clicked_at"`
+	ClickedAt_2 pgtype.Timestamptz `json:"clicked_at_2"`
+}
+
+type GetRefererStatsRow struct {
+	LinkID  int64       `json:"link_id"`
+	Date    pgtype.Date `json:"date"`
+	Referer pgtype.Text `json:"referer"`
+	Cnt     int64       `json:"cnt"`
+}
+
+func (q *Queries) GetRefererStats(ctx context.Context, arg GetRefererStatsParams) ([]GetRefererStatsRow, error) {
+	rows, err := q.db.Query(ctx, getRefererStats, arg.ClickedAt, arg.ClickedAt_2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetRefererStatsRow
+	for rows.Next() {
+		var i GetRefererStatsRow
+		if err := rows.Scan(
+			&i.LinkID,
+			&i.Date,
+			&i.Referer,
+			&i.Cnt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const insertClickLog = `-- name: InsertClickLog :one
 INSERT INTO click_logs (link_id, ip_address, referer, country, user_agent, clicked_at)
 VALUES ($1, $2, $3, $4, $5, $6)
@@ -166,72 +256,62 @@ func (q *Queries) InsertClickLog(ctx context.Context, arg InsertClickLogParams) 
 	return i, err
 }
 
-const isEventProcessed = `-- name: IsEventProcessed :one
-SELECT EXISTS(
-    SELECT 1 FROM processed_events WHERE task_id = $1
-) AS processed
+const updateDailyCountries = `-- name: UpdateDailyCountries :exec
+UPDATE daily_stats
+SET countries = $3
+WHERE link_id = $1 AND date = $2
 `
 
-func (q *Queries) IsEventProcessed(ctx context.Context, taskID string) (bool, error) {
-	row := q.db.QueryRow(ctx, isEventProcessed, taskID)
-	var processed bool
-	err := row.Scan(&processed)
-	return processed, err
+type UpdateDailyCountriesParams struct {
+	LinkID    int64       `json:"link_id"`
+	Date      pgtype.Date `json:"date"`
+	Countries []byte      `json:"countries"`
 }
 
-const markEventProcessed = `-- name: MarkEventProcessed :exec
-INSERT INTO processed_events (task_id, job_type)
-VALUES ($1, $2)
-`
-
-type MarkEventProcessedParams struct {
-	TaskID  string `json:"task_id"`
-	JobType string `json:"job_type"`
-}
-
-func (q *Queries) MarkEventProcessed(ctx context.Context, arg MarkEventProcessedParams) error {
-	_, err := q.db.Exec(ctx, markEventProcessed, arg.TaskID, arg.JobType)
+func (q *Queries) UpdateDailyCountries(ctx context.Context, arg UpdateDailyCountriesParams) error {
+	_, err := q.db.Exec(ctx, updateDailyCountries, arg.LinkID, arg.Date, arg.Countries)
 	return err
 }
 
-const upsertDailyStats = `-- name: UpsertDailyStats :exec
-INSERT INTO daily_stats (link_id, date, clicks, unique_visitors, countries, referers)
+const updateDailyReferers = `-- name: UpdateDailyReferers :exec
+UPDATE daily_stats
+SET referers = $3
+WHERE link_id = $1 AND date = $2
+`
+
+type UpdateDailyReferersParams struct {
+	LinkID   int64       `json:"link_id"`
+	Date     pgtype.Date `json:"date"`
+	Referers []byte      `json:"referers"`
+}
+
+func (q *Queries) UpdateDailyReferers(ctx context.Context, arg UpdateDailyReferersParams) error {
+	_, err := q.db.Exec(ctx, updateDailyReferers, arg.LinkID, arg.Date, arg.Referers)
+	return err
+}
+
+const upsertDailyClicks = `-- name: UpsertDailyClicks :exec
+INSERT INTO daily_stats (link_id, date, clicks, unique_visitors)
 SELECT
-    cl.link_id,
-    cl.clicked_at::date AS date,
+    link_id,
+    clicked_at::date AS date,
     COUNT(*) AS clicks,
-    COUNT(DISTINCT md5(COALESCE(cl.ip_address::text, '') || COALESCE(cl.user_agent, ''))) AS unique_visitors,
-    COALESCE(jsonb_object_agg(cl.country, cl.country_cnt) FILTER (WHERE cl.country IS NOT NULL), '{}') AS countries,
-    COALESCE(jsonb_object_agg(cl.referer, cl.referer_cnt) FILTER (WHERE cl.referer IS NOT NULL), '{}') AS referers
-FROM (
-    SELECT
-        link_id,
-        clicked_at,
-        ip_address,
-        user_agent,
-        country,
-        referer,
-        COUNT(*) OVER (PARTITION BY link_id, clicked_at::date, country) AS country_cnt,
-        COUNT(*) OVER (PARTITION BY link_id, clicked_at::date, referer) AS referer_cnt
-    FROM click_logs
-    WHERE clicked_at >= $1
-      AND clicked_at < $2
-) cl
-GROUP BY cl.link_id, cl.clicked_at::date
+    COUNT(DISTINCT md5(COALESCE(ip_address::text, '') || COALESCE(user_agent, ''))) AS unique_visitors
+FROM click_logs
+WHERE clicked_at >= $1 AND clicked_at < $2
+GROUP BY link_id, clicked_at::date
 ON CONFLICT (link_id, date)
 DO UPDATE SET
     clicks = EXCLUDED.clicks,
-    unique_visitors = EXCLUDED.unique_visitors,
-    countries = EXCLUDED.countries,
-    referers = EXCLUDED.referers
+    unique_visitors = EXCLUDED.unique_visitors
 `
 
-type UpsertDailyStatsParams struct {
+type UpsertDailyClicksParams struct {
 	ClickedAt   pgtype.Timestamptz `json:"clicked_at"`
 	ClickedAt_2 pgtype.Timestamptz `json:"clicked_at_2"`
 }
 
-func (q *Queries) UpsertDailyStats(ctx context.Context, arg UpsertDailyStatsParams) error {
-	_, err := q.db.Exec(ctx, upsertDailyStats, arg.ClickedAt, arg.ClickedAt_2)
+func (q *Queries) UpsertDailyClicks(ctx context.Context, arg UpsertDailyClicksParams) error {
+	_, err := q.db.Exec(ctx, upsertDailyClicks, arg.ClickedAt, arg.ClickedAt_2)
 	return err
 }

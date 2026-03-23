@@ -37,9 +37,3 @@ type Link struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	IsDeleted   bool               `json:"is_deleted"`
 }
-
-type ProcessedEvent struct {
-	TaskID      string             `json:"task_id"`
-	JobType     string             `json:"job_type"`
-	ProcessedAt pgtype.Timestamptz `json:"processed_at"`
-}
