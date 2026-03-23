@@ -23,6 +23,8 @@ type Config struct {
 
 	WorkerConcurrency int `env:"WORKER_CONCURRENCY" envDefault:"10"`
 
+	StatsAggregateCron string `env:"STATS_AGGREGATE_CRON" envDefault:"@every 30s"`
+
 	HealthCheckTimeout    time.Duration `env:"HEALTH_CHECK_TIMEOUT" envDefault:"2s"`
 	APIShutdownTimeout    time.Duration `env:"API_SHUTDOWN_TIMEOUT" envDefault:"10s"`
 	WorkerShutdownTimeout time.Duration `env:"WORKER_SHUTDOWN_TIMEOUT" envDefault:"30s"`

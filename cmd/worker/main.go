@@ -117,6 +117,29 @@ func main() {
 		return clickProcessor.ProcessPendingClicks(ctx)
 	})
 
+	statsAggregator := worker.NewStatsAggregator(rdb, pool, queries, logg)
+
+	mux.HandleFunc(tasks.TypeStatsAggregate, func(ctx context.Context, t *asynq.Task) error {
+		var payload tasks.StatsAggregatePayload
+		if len(t.Payload()) > 0 {
+			if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+				return fmt.Errorf("unmarshal stats aggregate payload: %w", err)
+			}
+		}
+		// If triggered by scheduler (nil payload), compute the window at runtime.
+		// Window covers today 00:00 UTC → tomorrow 00:00 UTC so in-progress
+		// clicks are captured. Idempotency key is per-date, so the heavy work
+		// (UpsertDailyClicks, IncrementTotalClicksSince) only runs once per day.
+		if payload.StartAt.IsZero() {
+			now := time.Now().UTC()
+			today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+			payload.StartAt = today
+			payload.EndAt = today.AddDate(0, 0, 1)
+			payload.RequestID = fmt.Sprintf("stats-aggregate-%s", today.Format("2006-01-02"))
+		}
+		return statsAggregator.Aggregate(ctx, payload)
+	})
+
 	scheduler := asynq.NewScheduler(
 		redisOpt,
 		&asynq.SchedulerOpts{},
@@ -130,6 +153,11 @@ func main() {
 	processTask := asynq.NewTask(tasks.TypeProcessPendingClicks, nil)
 	if _, err := scheduler.Register("@every 5s", processTask, asynq.Queue(queue.QueueDefault), asynq.Unique(10*time.Second)); err != nil {
 		logg.Error().Err(err).Msg("failed to register process clicks task")
+	}
+
+	statsTask := asynq.NewTask(tasks.TypeStatsAggregate, nil)
+	if _, err := scheduler.Register(cfg.StatsAggregateCron, statsTask, asynq.Queue(queue.QueueDefault)); err != nil {
+		logg.Error().Err(err).Msg("failed to register stats aggregate task")
 	}
 
 	workerErrors := make(chan error, 1)

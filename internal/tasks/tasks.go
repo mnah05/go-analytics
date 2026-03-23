@@ -10,6 +10,9 @@ const (
 	// TypeProcessPendingClicks is triggered by asynq scheduler every 5 seconds
 	// to batch process clicks from the Redis stream.
 	TypeProcessPendingClicks = "cron:process_clicks"
+	// TypeStatsAggregate is triggered by asynq scheduler daily at midnight UTC
+	// to aggregate click stats into daily_stats table.
+	TypeStatsAggregate = "cron:stats_aggregate"
 )
 
 // PingTaskPayload is the payload for the worker ping task, including correlation ID.
@@ -26,4 +29,10 @@ type ClickTrackPayload struct {
 	Referer   string    `json:"referer"`
 	RequestID string    `json:"request_id"`
 	ClickedAt time.Time `json:"clicked_at"`
+}
+
+type StatsAggregatePayload struct {
+	StartAt   time.Time `json:"start_at"`
+	EndAt     time.Time `json:"end_at"`
+	RequestID string    `json:"request_id"`
 }

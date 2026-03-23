@@ -42,6 +42,7 @@ func NewRouter(log zerolog.Logger, cfg *config.Config, db *pgxpool.Pool, redis *
 	health := NewHealthHandler(db, redis, cfg.HealthCheckTimeout)
 	worker := NewWorkerHandler(scheduler, db, redis)
 	link := NewLinkHandler(db, redis, idSalt)
+	stats := NewStatsHandler(db)
 
 	r.Get("/health", health.Check)
 
@@ -54,6 +55,7 @@ func NewRouter(log zerolog.Logger, cfg *config.Config, db *pgxpool.Pool, redis *
 	r.Route("/links", func(r chi.Router) {
 		r.Post("/", link.CreateLink)
 		r.Delete("/{slug}", link.DeleteLink)
+		r.Get("/{slug}/stats", stats.GetStats)
 	})
 
 	r.Get("/{slug}", link.GetLink)
