@@ -20,7 +20,7 @@ type SuccessResponse struct {
 func NewErrorResponse(w http.ResponseWriter, statusCode int, error string, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(ErrorResponse{
+	_ = json.NewEncoder(w).Encode(ErrorResponse{
 		Error:   error,
 		Message: message,
 	})
@@ -29,7 +29,7 @@ func NewErrorResponse(w http.ResponseWriter, statusCode int, error string, messa
 func NewErrorResponseWithDetails(w http.ResponseWriter, statusCode int, error string, message string, details any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(ErrorResponse{
+	_ = json.NewEncoder(w).Encode(ErrorResponse{
 		Error:   error,
 		Message: message,
 		Details: details,
@@ -39,7 +39,7 @@ func NewErrorResponseWithDetails(w http.ResponseWriter, statusCode int, error st
 func NewSuccessResponse(w http.ResponseWriter, statusCode int, data any, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(SuccessResponse{
+	_ = json.NewEncoder(w).Encode(SuccessResponse{
 		Success: true,
 		Data:    data,
 		Message: message,

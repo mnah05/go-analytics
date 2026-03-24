@@ -62,7 +62,7 @@ func (h *LinkHandler) CreateLink(w http.ResponseWriter, r *http.Request) {
 		NewErrorResponse(w, http.StatusInternalServerError, "internal server error", err.Error())
 		return
 	}
-	defer tx.Rollback(r.Context())
+	defer func() { _ = tx.Rollback(r.Context()) }()
 
 	qtx := h.db.WithTx(tx)
 

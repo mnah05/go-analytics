@@ -59,7 +59,7 @@ func (h *WorkerHandler) Ping(w http.ResponseWriter, r *http.Request) {
 			log.Error().Err(err).Msg("failed to read request body")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
-			json.NewEncoder(w).Encode(map[string]string{
+			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error": "request body too large (max 1MB)",
 			})
 			return
@@ -70,7 +70,7 @@ func (h *WorkerHandler) Ping(w http.ResponseWriter, r *http.Request) {
 			log.Error().Err(err).Msg("failed to decode ping request")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
+			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error": "invalid request body",
 			})
 			return
@@ -81,7 +81,7 @@ func (h *WorkerHandler) Ping(w http.ResponseWriter, r *http.Request) {
 			errors := validator.GetValidationErrors(err)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"error":   "validation failed",
 				"details": errors,
 			})
@@ -105,7 +105,7 @@ func (h *WorkerHandler) Ping(w http.ResponseWriter, r *http.Request) {
 		log.Error().Err(err).Msg("failed to marshal ping payload")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error": "failed to create task payload",
 		})
 		return
@@ -120,7 +120,7 @@ func (h *WorkerHandler) Ping(w http.ResponseWriter, r *http.Request) {
 		log.Error().Err(err).Msg("failed to enqueue worker ping task")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error":   "failed to enqueue task",
 			"details": err.Error(),
 		})
@@ -135,7 +135,7 @@ func (h *WorkerHandler) Ping(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(PingResponse{
+	_ = json.NewEncoder(w).Encode(PingResponse{
 		Success:  true,
 		TaskID:   taskID,
 		TaskType: tasks.TypeWorkerPing,
@@ -191,7 +191,7 @@ func (h *WorkerHandler) Status(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(overall)
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"request_id": requestID,
 		"status":     status,
 		"queues":     queue.Names(),
@@ -256,5 +256,5 @@ func (h *WorkerHandler) Health(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(overall)
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }

@@ -35,7 +35,7 @@ func NewRouter(log zerolog.Logger, cfg *config.Config, db *pgxpool.Pool, redis *
 		httprate.WithLimitHandler(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"error":"rate limit exceeded","message":"too many requests"}`))
+			_, _ = w.Write([]byte(`{"error":"rate limit exceeded","message":"too many requests"}`))
 		}),
 	))
 

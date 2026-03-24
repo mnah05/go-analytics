@@ -25,7 +25,11 @@ func main() {
 
 	logg, logCleanup := logger.NewLogger(cfg, "logs/api.log")
 	if logCleanup != nil {
-		defer logCleanup()
+		defer func() {
+			if err := logCleanup(); err != nil {
+				logg.Error().Err(err).Msg("failed to cleanup logger")
+			}
+		}()
 	}
 	ctx := context.Background()
 
