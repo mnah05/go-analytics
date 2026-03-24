@@ -3,7 +3,7 @@ CREATE TABLE links (
     slug CHAR(11) UNIQUE DEFAULT '',
     original_url TEXT NOT NULL,
     total_clicks BIGINT NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW (),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     is_deleted BOOLEAN NOT NULL DEFAULT FALSE
 );
 
@@ -14,7 +14,7 @@ CREATE TABLE click_logs (
     referer TEXT,
     country VARCHAR(2),
     user_agent TEXT,
-    clicked_at TIMESTAMPTZ NOT NULL DEFAULT NOW ()
+    clicked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_click_logs_link_clicked ON click_logs (link_id, clicked_at DESC);
@@ -26,8 +26,9 @@ CREATE TABLE daily_stats (
     date DATE NOT NULL,
     clicks BIGINT NOT NULL DEFAULT 0,
     unique_visitors BIGINT NOT NULL DEFAULT 0,
-    countries JSONB NOT NULL DEFAULT '{}',
+    countries JSONB NOT NULL DEFAULT '{}'
     -- {"US": 500, "IN": 300}
+,
     referers JSONB NOT NULL DEFAULT '{}',
     PRIMARY KEY (link_id, date)
 );
