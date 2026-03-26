@@ -48,9 +48,13 @@ func main() {
 	}
 
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     cfg.RedisAddr,
-		Password: cfg.RedisPassword,
-		DB:       cfg.RedisDB,
+		Addr:         cfg.RedisAddr,
+		Password:     cfg.RedisPassword,
+		DB:           cfg.RedisDB,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
+		PoolSize:     20,
+		MaxRetries:   3,
 	})
 
 	if err := rdb.Ping(ctx).Err(); err != nil {
@@ -76,7 +80,7 @@ func main() {
 		logg.Error().Err(err).Msg("invalid URL_SHORTENER_SALT")
 		return
 	}
-	router := handler.NewRouter(logg, cfg, pool, rdb, schedulerClient, idSalt)
+	router, stopClickWorkers := handler.NewRouter(logg, cfg, pool, rdb, schedulerClient, idSalt)
 
 	server := &http.Server{
 		Addr:           ":" + cfg.AppPort,
@@ -118,6 +122,9 @@ func main() {
 	} else {
 		logg.Info().Msg("server shutdown completed gracefully")
 	}
+
+	stopClickWorkers()
+	logg.Info().Msg("click workers stopped")
 
 	if err := schedulerClient.Close(); err != nil {
 		logg.Error().Err(err).Msg("scheduler client close failed")

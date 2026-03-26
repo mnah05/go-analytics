@@ -9,6 +9,7 @@ import (
 	"go-analytics/internal/db"
 	"go-analytics/internal/tasks"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -96,17 +97,25 @@ func (sa *StatsAggregator) Aggregate(ctx context.Context, payload tasks.StatsAgg
 		countryMap[key][row.Country.String] = row.Cnt
 	}
 
-	for key, counts := range countryMap {
-		data, jsonErr := json.Marshal(counts)
-		if jsonErr != nil {
-			return fmt.Errorf("marshal country stats: %w", jsonErr)
+	if len(countryMap) > 0 {
+		batch := &pgx.Batch{}
+		for key, counts := range countryMap {
+			data, jsonErr := json.Marshal(counts)
+			if jsonErr != nil {
+				return fmt.Errorf("marshal country stats: %w", jsonErr)
+			}
+			batch.Queue("UPDATE daily_stats SET countries = $3 WHERE link_id = $1 AND date = $2",
+				key.LinkID, key.Date, data)
 		}
-		if err = qtx.UpdateDailyCountries(ctx, db.UpdateDailyCountriesParams{
-			LinkID:    key.LinkID,
-			Date:      key.Date,
-			Countries: data,
-		}); err != nil {
-			return fmt.Errorf("update daily countries: %w", err)
+		br := tx.SendBatch(ctx, batch)
+		for range countryMap {
+			if _, err = br.Exec(); err != nil {
+				_ = br.Close()
+				return fmt.Errorf("batch update daily countries: %w", err)
+			}
+		}
+		if err = br.Close(); err != nil {
+			return fmt.Errorf("close country batch: %w", err)
 		}
 	}
 
@@ -128,17 +137,25 @@ func (sa *StatsAggregator) Aggregate(ctx context.Context, payload tasks.StatsAgg
 		refererMap[key][row.Referer.String] = row.Cnt
 	}
 
-	for key, counts := range refererMap {
-		data, jsonErr := json.Marshal(counts)
-		if jsonErr != nil {
-			return fmt.Errorf("marshal referer stats: %w", jsonErr)
+	if len(refererMap) > 0 {
+		batch := &pgx.Batch{}
+		for key, counts := range refererMap {
+			data, jsonErr := json.Marshal(counts)
+			if jsonErr != nil {
+				return fmt.Errorf("marshal referer stats: %w", jsonErr)
+			}
+			batch.Queue("UPDATE daily_stats SET referers = $3 WHERE link_id = $1 AND date = $2",
+				key.LinkID, key.Date, data)
 		}
-		if err = qtx.UpdateDailyReferers(ctx, db.UpdateDailyReferersParams{
-			LinkID:   key.LinkID,
-			Date:     key.Date,
-			Referers: data,
-		}); err != nil {
-			return fmt.Errorf("update daily referers: %w", err)
+		br := tx.SendBatch(ctx, batch)
+		for range refererMap {
+			if _, err = br.Exec(); err != nil {
+				_ = br.Close()
+				return fmt.Errorf("batch update daily referers: %w", err)
+			}
+		}
+		if err = br.Close(); err != nil {
+			return fmt.Errorf("close referer batch: %w", err)
 		}
 	}
 
