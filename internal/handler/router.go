@@ -17,7 +17,9 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func NewRouter(log zerolog.Logger, cfg *config.Config, db *pgxpool.Pool, redis *redis.Client, scheduler *scheduler.Client, idSalt uint64) http.Handler {
+// NewRouter creates the HTTP handler and returns a cleanup function that must
+// be called during graceful shutdown to drain in-flight click workers.
+func NewRouter(log zerolog.Logger, cfg *config.Config, db *pgxpool.Pool, redis *redis.Client, scheduler *scheduler.Client, idSalt uint64) (http.Handler, func()) {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -41,8 +43,8 @@ func NewRouter(log zerolog.Logger, cfg *config.Config, db *pgxpool.Pool, redis *
 
 	health := NewHealthHandler(db, redis, cfg.HealthCheckTimeout)
 	worker := NewWorkerHandler(scheduler, db, redis)
-	link := NewLinkHandler(db, redis, idSalt)
-	stats := NewStatsHandler(db)
+	link := NewLinkHandler(db, redis, idSalt, log)
+	stats := NewStatsHandler(db, redis)
 
 	r.Get("/health", health.Check)
 
@@ -60,5 +62,5 @@ func NewRouter(log zerolog.Logger, cfg *config.Config, db *pgxpool.Pool, redis *
 
 	r.Get("/{slug}", link.GetLink)
 
-	return r
+	return r, link.Stop
 }

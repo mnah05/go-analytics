@@ -56,9 +56,13 @@ func main() {
 	}
 
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     cfg.RedisAddr,
-		Password: cfg.RedisPassword,
-		DB:       cfg.RedisDB,
+		Addr:         cfg.RedisAddr,
+		Password:     cfg.RedisPassword,
+		DB:           cfg.RedisDB,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
+		PoolSize:     20,
+		MaxRetries:   3,
 	})
 
 	if err := redisstream.EnsureStreamExists(ctx, rdb); err != nil {

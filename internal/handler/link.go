@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"go-analytics/internal/db"
@@ -19,7 +20,13 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
 	"github.com/sqids/sqids-go"
+)
+
+const (
+	clickWorkerCount = 64
+	clickChanSize    = 10000
 )
 
 type LinkHandler struct {
@@ -27,14 +34,37 @@ type LinkHandler struct {
 	pool      *pgxpool.Pool
 	redis     *redis.Client
 	shortener *sqids.Sqids
+	clickCh   chan tasks.ClickTrackPayload
+	wg        sync.WaitGroup
+	logg      zerolog.Logger
 }
 
-func NewLinkHandler(pool *pgxpool.Pool, redis *redis.Client, salt uint64) *LinkHandler {
-	return &LinkHandler{
+func NewLinkHandler(pool *pgxpool.Pool, rdb *redis.Client, salt uint64, logg zerolog.Logger) *LinkHandler {
+	h := &LinkHandler{
 		db:        db.New(pool),
 		pool:      pool,
-		redis:     redis,
+		redis:     rdb,
 		shortener: helper.NewShortener(salt),
+		clickCh:   make(chan tasks.ClickTrackPayload, clickChanSize),
+		logg:      logg,
+	}
+	h.wg.Add(clickWorkerCount)
+	for range clickWorkerCount {
+		go h.clickWorker()
+	}
+	return h
+}
+
+// Stop drains the click worker pool. Call during graceful shutdown.
+func (h *LinkHandler) Stop() {
+	close(h.clickCh)
+	h.wg.Wait()
+}
+
+func (h *LinkHandler) clickWorker() {
+	defer h.wg.Done()
+	for payload := range h.clickCh {
+		h.sendClickToStream(payload)
 	}
 }
 
@@ -122,13 +152,8 @@ func (h *LinkHandler) GetLink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	go h.addClickToStream(r, slug)
-
-	http.Redirect(w, r, targetURL, http.StatusFound)
-}
-
-func (h *LinkHandler) addClickToStream(r *http.Request, slug string) {
-	ctx := context.Background()
+	// Extract request data before returning the response; worker goroutines
+	// outlive the request so they must not reference *http.Request.
 	payload := tasks.ClickTrackPayload{
 		Slug:      slug,
 		IpAddress: r.RemoteAddr,
@@ -138,8 +163,21 @@ func (h *LinkHandler) addClickToStream(r *http.Request, slug string) {
 		ClickedAt: time.Now().UTC(),
 	}
 
+	select {
+	case h.clickCh <- payload:
+	default:
+		log.Warn().Msg("click channel full, dropping click")
+	}
+
+	http.Redirect(w, r, targetURL, http.StatusFound)
+}
+
+func (h *LinkHandler) sendClickToStream(payload tasks.ClickTrackPayload) {
+	ctx := context.Background()
+
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
+		h.logg.Error().Err(err).Msg("failed to marshal click payload")
 		return
 	}
 
@@ -151,8 +189,7 @@ func (h *LinkHandler) addClickToStream(r *http.Request, slug string) {
 			"data": string(payloadBytes),
 		},
 	}).Err(); err != nil {
-		log := logger.FromChiContext(r.Context())
-		log.Error().Err(err).Msg("failed to add click to stream")
+		h.logg.Error().Err(err).Msg("failed to add click to stream")
 	}
 }
 

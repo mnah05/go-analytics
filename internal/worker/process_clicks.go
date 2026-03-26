@@ -12,6 +12,7 @@ import (
 	redisstream "go-analytics/internal/redis"
 	"go-analytics/internal/tasks"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -124,19 +125,26 @@ func (cp *ClickProcessor) ProcessPendingClicks(ctx context.Context) (err error) 
 		}
 	}()
 
-	qtx := cp.queries.WithTx(tx)
-
-	for _, click := range clicks {
-		_, err := qtx.InsertClickLog(ctx, db.InsertClickLogParams{
-			LinkID:    click.LinkID,
-			IpAddress: click.IpAddress,
-			Referer:   click.Referer,
-			UserAgent: click.UserAgent,
-			ClickedAt: click.ClickedAt,
-		})
-		if err != nil {
-			return fmt.Errorf("insert click log: %w", err)
+	rows := make([][]interface{}, len(clicks))
+	for i, click := range clicks {
+		rows[i] = []interface{}{
+			click.LinkID,
+			click.IpAddress,
+			click.Referer,
+			pgtype.Text{}, // country — not populated from stream
+			click.UserAgent,
+			click.ClickedAt,
 		}
+	}
+
+	_, err = tx.CopyFrom(
+		ctx,
+		pgx.Identifier{"click_logs"},
+		[]string{"link_id", "ip_address", "referer", "country", "user_agent", "clicked_at"},
+		pgx.CopyFromRows(rows),
+	)
+	if err != nil {
+		return fmt.Errorf("bulk insert click logs: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

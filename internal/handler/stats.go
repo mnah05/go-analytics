@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -11,14 +12,18 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
+const statsCacheTTL = 60 * time.Second
+
 type StatsHandler struct {
-	db *db.Queries
+	db    *db.Queries
+	redis *redis.Client
 }
 
-func NewStatsHandler(pool *pgxpool.Pool) *StatsHandler {
-	return &StatsHandler{db: db.New(pool)}
+func NewStatsHandler(pool *pgxpool.Pool, rdb *redis.Client) *StatsHandler {
+	return &StatsHandler{db: db.New(pool), redis: rdb}
 }
 
 type dailyStatResponse struct {
@@ -40,13 +45,6 @@ func (h *StatsHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	log := logger.FromChiContext(r.Context())
 
-	link, err := h.db.GetLinkBySlug(r.Context(), pgtype.Text{String: slug, Valid: true})
-	if err != nil {
-		log.Error().Err(err).Str("slug", slug).Msg("link not found")
-		NewErrorResponse(w, http.StatusNotFound, "link not found", err.Error())
-		return
-	}
-
 	// Parse optional date range query params; default to last 30 days
 	now := time.Now().UTC()
 	endDate := now
@@ -61,6 +59,25 @@ func (h *StatsHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 		if t, parseErr := time.Parse("2006-01-02", e); parseErr == nil {
 			endDate = t
 		}
+	}
+
+	// Try Redis cache first
+	cacheKey := fmt.Sprintf("stats:%s:%s:%s",
+		slug, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+
+	if cached, err := h.redis.Get(r.Context(), cacheKey).Bytes(); err == nil {
+		var resp statsResponse
+		if json.Unmarshal(cached, &resp) == nil {
+			NewSuccessResponse(w, http.StatusOK, resp, "")
+			return
+		}
+	}
+
+	link, err := h.db.GetLinkBySlug(r.Context(), pgtype.Text{String: slug, Valid: true})
+	if err != nil {
+		log.Error().Err(err).Str("slug", slug).Msg("link not found")
+		NewErrorResponse(w, http.StatusNotFound, "link not found", err.Error())
+		return
 	}
 
 	summary, err := h.db.GetLinkStatsSummary(r.Context(), link.ID)
@@ -99,10 +116,17 @@ func (h *StatsHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 		daily = append(daily, d)
 	}
 
-	NewSuccessResponse(w, http.StatusOK, statsResponse{
+	resp := statsResponse{
 		Slug:                slug,
 		TotalClicks:         summary.TotalClicks,
 		TotalUniqueVisitors: summary.TotalUniqueVisitors,
 		Daily:               daily,
-	}, "")
+	}
+
+	// Cache the response (best-effort, non-fatal)
+	if data, err := json.Marshal(resp); err == nil {
+		_ = h.redis.Set(r.Context(), cacheKey, data, statsCacheTTL).Err()
+	}
+
+	NewSuccessResponse(w, http.StatusOK, resp, "")
 }
