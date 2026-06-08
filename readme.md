@@ -16,20 +16,27 @@ their country, what site referred them, their device type, and when they clicked
 
 ## Architecture
 
-```
-┌────────────┐     ┌────────────┐     ┌───────────────┐
-│   Client   │────▶│  API (Chi) │────▶│  PostgreSQL   │
-│            │     │  :8080     │     │  (pgx pool)   │
-└────────────┘     └─────┬──────┘     └───────────────┘
-                         │                    ▲
-                    XADD │ click              │ batch INSERT
-                    to   │ event              │ (every 5s)
-                    Redis│                    │
-                         ▼                    │
-                   ┌───────────┐      ┌──────┴────────┐
-                   │  Redis    │◀────▶│ Worker (Asynq) │
-                   │  Stream   │      │ + Scheduler    │
-                   └───────────┘      └───────────────┘
+```mermaid
+flowchart TD
+    Client["🌐 Client"] -->|"GET /{slug}"| API["API (Chi)\n:8080"]
+
+    API -->|"cache hit"| RedisCache["Redis\nlink:{slug}"]
+    API -->|"cache miss"| PG[("PostgreSQL\n(pgx pool)")]
+    PG -->|"populate cache"| RedisCache
+    RedisCache -->|"302 redirect"| Client
+
+    API -.->|"XADD click event\n(fire & forget)"| RedisStream["Redis Stream\nclicks:stream"]
+
+    Worker["Worker (Asynq)\n+ Scheduler"] -->|"XREADGROUP\n@every 5s"| RedisStream
+    RedisStream --> Worker
+    Worker -->|"batch INSERT\n(single tx)"| PG
+
+    style Client fill:#e1f5fe
+    style API fill:#c8e6c9
+    style PG fill:#fff3e0
+    style RedisCache fill:#f3e5f5
+    style RedisStream fill:#f3e5f5
+    style Worker fill:#ffcdd2
 ```
 
 **Two processes:**
@@ -99,6 +106,37 @@ GET /links/{slug}/stats?start=2026-01-01&end=2026-03-31
 | Analytics queries slow | Pre-computed daily_stats rollups (scan ~30 rows, not millions) |
 | Rate limiting          | In-memory `httprate` (10 req/s per IP) before touching DB  |
 | Idempotency            | Redis key `stats:processed:{date}` prevents double-aggregation |
+
+---
+
+## Performance (k6 Benchmark)
+
+Single-instance load test results (localhost, Go 1.25, PostgreSQL 16 + Redis 8 in Docker):
+
+| Metric | Value |
+|---|---|
+| **Max sustained throughput** | **~4,500 req/s** |
+| **Peak burst throughput** | **~5,000 req/s** |
+| **Total requests handled** | 156,322 in 80s |
+| **Server errors** | **0** |
+| **Bottleneck** | Go scheduler / CPU (not DB or Redis) |
+
+### Latency at peak load
+
+| Endpoint | p50 | p95 |
+|---|---|---|
+| `GET /{slug}` (redirect) | 0.8ms | 2.6ms |
+| `POST /links/` (create) | 2.5ms | 7.5ms |
+| `GET /links/{slug}/stats` | 0.6ms | 2.1ms |
+
+The rate limiter (10 req/s per IP) is the primary constraint in production — without it, a single instance saturates at ~4,500 req/s. Horizontal scaling via a load balancer pushes throughput linearly since neither PostgreSQL nor Redis is the bottleneck.
+
+To run the benchmark yourself:
+```bash
+# Temporarily disable rate limiter (internal/handler/router.go), then:
+k6 run k6/benchmark.js
+# Restore rate limiter after testing
+```
 
 ---
 
@@ -330,7 +368,7 @@ go-analytics/
 | Link expiration          | Stretch goal |
 | CSV export               | Stretch goal |
 | Password-protected links | Stretch goal |
-| k6 load tests            | Not created |
+| k6 load tests            | Done — see `k6/benchmark.js` |
 
 ---
 

@@ -39,3 +39,6 @@ request.md
 *.yaml -diff
 
 CLAUDE.md
+
+# k6 benchmark output
+results/
