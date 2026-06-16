@@ -1,105 +1,98 @@
-import http from 'k6/http';
-import { check, sleep } from 'k6';
-import { Rate, Trend } from 'k6/metrics';
+import http from "k6/http";
+import { check } from "k6";
+import { BASE_URL, TARGET_URL, createLink, createLinks } from "./lib.js";
 
-const failures = new Rate('failed_requests');
-const redirectLatency = new Trend('redirect_latency');
-const createLatency = new Trend('create_latency');
-const statsLatency = new Trend('stats_latency');
+// How many req/s can each JSON API endpoint handle?
+// Routes tested: GET /health, POST /links/, GET /links/{slug}/stats, DELETE /links/{slug}
+// Redirect (GET /{slug}) is not an API route and is excluded.
+//
+// Disable the rate limiter before running (internal/handler/router.go).
+//
+//   k6 run k6/benchmark.js                    # all endpoints, one after another
+//   k6 run -e ENDPOINT=health k6/benchmark.js # single endpoint
 
-export const options = {
-  scenarios: {
-    // Ramping arrival rate to find saturation point on redirects (critical path)
-    throughput_ramp: {
-      executor: 'ramping-arrival-rate',
-      startRate: 50,
-      timeUnit: '1s',
-      preAllocatedVUs: 200,
-      maxVUs: 300,
-      stages: [
-        { duration: '10s', target: 100 },   // 100 req/s
-        { duration: '10s', target: 500 },   // 500 req/s
-        { duration: '10s', target: 1000 },  // 1000 req/s
-        { duration: '10s', target: 2000 },  // 2000 req/s
-        { duration: '10s', target: 3000 },  // 3000 req/s
-        { duration: '10s', target: 4000 },  // 4000 req/s
-        { duration: '10s', target: 5000 },  // 5000 req/s
-        { duration: '10s', target: 0 },     // cooldown
-      ],
-      exec: 'benchmark',
-    },
-  },
-  thresholds: {
-    failed_requests: ['rate<0.5'], // allow up to 50% failure before we declare saturation
-  },
-};
+const endpoint = __ENV.ENDPOINT || "all";
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
-const TARGET_URL = 'https://example.com';
-const headers = { 'Content-Type': 'application/json' };
+const readRamp = [
+  { duration: "10s", target: 100 },
+  { duration: "10s", target: 500 },
+  { duration: "10s", target: 1000 },
+  { duration: "10s", target: 2000 },
+  { duration: "10s", target: 3000 },
+  { duration: "10s", target: 0 },
+];
 
-// Pool of slugs shared across VUs for realistic redirect targets
-let redirectSlugs = [];
+const writeRamp = [
+  { duration: "10s", target: 50 },
+  { duration: "10s", target: 200 },
+  { duration: "10s", target: 500 },
+  { duration: "10s", target: 1000 },
+  { duration: "10s", target: 0 },
+];
 
-export function setup() {
-  // Pre-create slugs for redirects
-  const slugs = [];
-  for (let i = 0; i < 50; i++) {
-    const res = http.post(`${BASE_URL}/links/`, JSON.stringify({ url: `${TARGET_URL}?n=${i}` }), { headers });
-    if (res.status === 201) {
-      slugs.push(res.json('data.slug'));
-    }
-  }
-  // Also create some extra slugs that won't get deleted
-  for (let i = 0; i < 50; i++) {
-    const res = http.post(`${BASE_URL}/links/`, JSON.stringify({ url: `${TARGET_URL}?b=${i}` }), { headers });
-    if (res.status === 201) {
-      slugs.push(res.json('data.slug'));
-    }
-  }
-  console.log(`setup: created ${slugs.length} slugs`);
-  return { slugs };
+function arrivalScenario(exec, stages, startTime) {
+  return {
+    executor: "ramping-arrival-rate",
+    exec,
+    startRate: Math.max(1, Math.floor(stages[0].target / 2)),
+    timeUnit: "1s",
+    preAllocatedVUs: 100,
+    maxVUs: 300,
+    stages,
+    ...(startTime ? { startTime } : {}),
+  };
 }
 
-export function benchmark(data) {
-  const slugs = data.slugs;
-  if (slugs.length === 0) return;
+const allScenarios = {
+  health: arrivalScenario("health", readRamp, "0s"),
+  create: arrivalScenario("create", writeRamp, "60s"),
+  stats: arrivalScenario("stats", readRamp, "110s"),
+  delete: arrivalScenario("deleteLink", writeRamp, "170s"),
+};
 
-  const r = Math.random();
+function buildOptions() {
+  if (endpoint === "all") {
+    return { scenarios: allScenarios };
+  }
+  if (!allScenarios[endpoint]) {
+    throw new Error(
+      `Unknown ENDPOINT="${endpoint}". Use: health, create, stats, delete, all`,
+    );
+  }
+  const { startTime, ...scenario } = allScenarios[endpoint];
+  return { scenarios: { [endpoint]: scenario } };
+}
 
-  // 60% redirects (critical path - what we care about most)
-  if (r < 0.60) {
-    const slug = slugs[Math.floor(Math.random() * slugs.length)];
-    const res = http.get(`${BASE_URL}/${slug}`, { redirects: 0 });
-    redirectLatency.add(res.timings.duration);
-    check(res, { 'redirect 302': (r) => r.status === 302 });
-    failures.add(res.status !== 302);
+export const options = buildOptions();
+
+export function setup() {
+  if (endpoint === "health" || endpoint === "create") {
+    return { slugs: [] };
   }
-  // 20% create links
-  else if (r < 0.80) {
-    const res = http.post(`${BASE_URL}/links/`, JSON.stringify({ url: `${TARGET_URL}?t=${Date.now()}` }), { headers });
-    createLatency.add(res.timings.duration);
-    check(res, { 'create 201': (r) => r.status === 201 });
-    failures.add(res.status !== 201);
-    if (res.status === 201) {
-      slugs.push(res.json('data.slug'));
-    }
-  }
-  // 15% stats
-  else if (r < 0.95) {
-    const slug = slugs[Math.floor(Math.random() * slugs.length)];
-    const res = http.get(`${BASE_URL}/links/${slug}/stats`);
-    statsLatency.add(res.timings.duration);
-    check(res, { 'stats 200': (r) => r.status === 200 });
-    failures.add(res.status !== 200);
-  }
-  // 5% delete
-  else if (slugs.length > 10) { // keep minimum pool
-    const idx = Math.floor(Math.random() * slugs.length);
-    const slug = slugs[idx];
-    const res = http.del(`${BASE_URL}/links/${slug}`);
-    check(res, { 'delete 200': (r) => r.status === 200 });
-    failures.add(res.status !== 200);
-    slugs.splice(idx, 1);
-  }
+  const count = endpoint === "delete" ? 5000 : 50;
+  return { slugs: createLinks(count) };
+}
+
+export function health() {
+  const res = http.get(`${BASE_URL}/health`);
+  check(res, { "GET /health → 200": (r) => r.status === 200 });
+}
+
+export function create() {
+  const res = createLink(`${TARGET_URL}?t=${Date.now()}-${__VU}-${__ITER}`);
+  check(res, { "POST /links/ → 201": (r) => r.status === 201 });
+}
+
+export function stats(data) {
+  if (data.slugs.length === 0) return;
+  const slug = data.slugs[Math.floor(Math.random() * data.slugs.length)];
+  const res = http.get(`${BASE_URL}/links/${slug}/stats`);
+  check(res, { "GET /links/{slug}/stats → 200": (r) => r.status === 200 });
+}
+
+export function deleteLink(data) {
+  const i = __VU - 1 + __ITER * 1000;
+  if (i >= data.slugs.length) return;
+  const res = http.del(`${BASE_URL}/links/${data.slugs[i]}`);
+  check(res, { "DELETE /links/{slug} → 200": (r) => r.status === 200 });
 }

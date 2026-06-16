@@ -109,33 +109,24 @@ GET /links/{slug}/stats?start=2026-01-01&end=2026-03-31
 
 ---
 
-## Performance (k6 Benchmark)
+## Performance (k6)
 
-Single-instance load test results (localhost, Go 1.25, PostgreSQL 16 + Redis 8 in Docker):
+Single-instance API benchmark (localhost, Go 1.25, PostgreSQL 16 + Redis 8 in Docker, rate limiter disabled for test). Each endpoint was tested individually via `ENDPOINT=<name>` to avoid interference. JSON API routes only — redirect (`GET /{slug}`) excluded.
 
-| Metric | Value |
-|---|---|
-| **Max sustained throughput** | **~4,500 req/s** |
-| **Peak burst throughput** | **~5,000 req/s** |
-| **Total requests handled** | 156,322 in 80s |
-| **Server errors** | **0** |
-| **Bottleneck** | Go scheduler / CPU (not DB or Redis) |
+| Endpoint | Max throughput (0% errors) | p50 | p95 |
+|---|---|---|---|
+| `GET /health` | ~1,089 req/s | 1.13ms | 14.48ms |
+| `POST /links/` | ~352 req/s | 1.69ms | 7.35ms |
+| `GET /links/{slug}/stats` | ~1,103 req/s | 0.32ms | 1.33ms |
+| `DELETE /links/{slug}` | ~500 req/s* | 1.04ms | 4.44ms |
 
-### Latency at peak load
+\*Delete is capped by the pre-created slug pool in `k6/benchmark.js`, not server saturation.
 
-| Endpoint | p50 | p95 |
-|---|---|---|
-| `GET /{slug}` (redirect) | 0.8ms | 2.6ms |
-| `POST /links/` (create) | 2.5ms | 7.5ms |
-| `GET /links/{slug}/stats` | 0.6ms | 2.1ms |
+Disable the rate limiter first (`internal/handler/router.go`), then:
 
-The rate limiter (10 req/s per IP) is the primary constraint in production — without it, a single instance saturates at ~4,500 req/s. Horizontal scaling via a load balancer pushes throughput linearly since neither PostgreSQL nor Redis is the bottleneck.
-
-To run the benchmark yourself:
 ```bash
-# Temporarily disable rate limiter (internal/handler/router.go), then:
-k6 run k6/benchmark.js
-# Restore rate limiter after testing
+k6 run k6/benchmark.js                         # all endpoints sequentially
+k6 run -e ENDPOINT=health k6/benchmark.js    # one endpoint only
 ```
 
 ---
@@ -368,7 +359,7 @@ go-analytics/
 | Link expiration          | Stretch goal |
 | CSV export               | Stretch goal |
 | Password-protected links | Stretch goal |
-| k6 load tests            | Done — see `k6/benchmark.js` |
+| k6 API tests             | Done — see `k6/` |
 
 ---
 
